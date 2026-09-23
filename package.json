@@ -1,0 +1,25 @@
+{
+  "name": "viral-plus-api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "GEMINI_API_KEY": {
+        "description": "Clé Gemini API sécurisée. Crée-la dans Google AI Studio : https://aistudio.google.com/apikey"
+      },
+      "ALLOWED_ORIGIN": {
+        "description": "Origine autorisée pour Viral+ (déjà configurée)."
+      },
+      "RULEBOOK_URL": {
+        "description": "Référentiel Meta utilisé par Viral+ (déjà configuré)."
+      }
+    }
+  }
+}

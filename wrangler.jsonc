@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "viral-plus-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-22",
+  "vars": {
+    "ALLOWED_ORIGIN": "https://madanesliav04-droid.github.io",
+    "RULEBOOK_URL": "https://madanesliav04-droid.github.io/-ReelScore/meta-rules.json",
+    "MODEL": "gemini-3.8-flash"
+  }
+}
