@@ -12,7 +12,26 @@ export default {
 
     const url = new URL(request.url);
     if (request.method === 'GET' && url.pathname === '/health') {
-      return json({ ok: true, service: 'Viral+ API', model: env.MODEL || 'gemini-3.8-flash' }, 200, cors);
+      const health = { ok: true, service: 'Viral+ API', model: env.MODEL || 'gemini-3.8-flash' };
+      if (url.searchParams.get('deep') !== '1') return json(health, 200, cors);
+      if (!env.GEMINI_API_KEY) {
+        return json({ ...health, ok: false, gemini_auth_ok: false, reason: 'missing_key' }, 503, cors);
+      }
+      try {
+        // Verify authentication without generating content or exposing credentials.
+        const response = await fetch(`${GOOGLE_BASE}/v1beta/models?pageSize=1`, {
+          headers: { 'x-goog-api-key': env.GEMINI_API_KEY },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!response.ok) {
+          return json({ ...health, ok: false, gemini_auth_ok: false, gemini_status: response.status }, 503, cors);
+        }
+        const payload = await response.json();
+        const valid = Array.isArray(payload.models) && payload.models.length > 0;
+        return json({ ...health, ok: valid, gemini_auth_ok: valid }, valid ? 200 : 503, cors);
+      } catch {
+        return json({ ...health, ok: false, gemini_auth_ok: false, reason: 'verification_unavailable' }, 503, cors);
+      }
     }
 
     if (url.pathname !== '/analyze' || request.method !== 'POST') {
