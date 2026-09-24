@@ -12,26 +12,36 @@ export default {
 
     const url = new URL(request.url);
     if (request.method === 'GET' && url.pathname === '/health') {
-      const health = { ok: true, service: 'Viral+ API', model: env.MODEL || 'gemini-3.8-flash' };
-      if (url.searchParams.get('deep') !== '1') return json(health, 200, cors);
-      if (!env.GEMINI_API_KEY) {
-        return json({ ...health, ok: false, gemini_auth_ok: false, reason: 'missing_key' }, 503, cors);
-      }
-      try {
-        // Verify authentication without generating content or exposing credentials.
-        const response = await fetch(`${GOOGLE_BASE}/v1beta/models?pageSize=1`, {
-          headers: { 'x-goog-api-key': env.GEMINI_API_KEY },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (!response.ok) {
-          return json({ ...health, ok: false, gemini_auth_ok: false, gemini_status: response.status }, 503, cors);
+      const primaryModel = env.MODEL || 'gemini-3.8-flash';
+      const fallbackModel = env.FALLBACK_MODEL || 'gemini-3.5-flash-lite';
+      const health = {
+        ok: true,
+        service: 'Viral+ API',
+        model: primaryModel,
+        fallback_model: fallbackModel,
+        gemini_secret_configured: Boolean(env.GEMINI_API_KEY)
+      };
+      if (url.searchParams.get('deep') === '1' && env.GEMINI_API_KEY) {
+        try {
+          const check = await fetch(`${GOOGLE_BASE}/v1beta/models/${encodeURIComponent(primaryModel)}`, {
+            headers: { 'x-goog-api-key': String(env.GEMINI_API_KEY).trim() }
+          });
+          health.gemini_auth_ok = check.ok;
+          health.gemini_status = check.status;
+          if (!check.ok) {
+            try {
+              const body = await check.json();
+              health.gemini_error = classifyGoogleAuth(body?.error?.message || body?.message || '');
+            } catch {
+              health.gemini_error = 'UNKNOWN_AUTH_ERROR';
+            }
+          }
+        } catch {
+          health.gemini_auth_ok = false;
+          health.gemini_error = 'NETWORK_ERROR';
         }
-        const payload = await response.json();
-        const valid = Array.isArray(payload.models) && payload.models.length > 0;
-        return json({ ...health, ok: valid, gemini_auth_ok: valid }, valid ? 200 : 503, cors);
-      } catch {
-        return json({ ...health, ok: false, gemini_auth_ok: false, reason: 'verification_unavailable' }, 503, cors);
       }
+      return json(health, 200, cors);
     }
 
     if (url.pathname !== '/analyze' || request.method !== 'POST') {
@@ -46,6 +56,7 @@ export default {
       return json({ error: 'Le secret GEMINI_API_KEY n’est pas configuré sur Cloudflare.' }, 500, cors);
     }
 
+    const apiKey = String(env.GEMINI_API_KEY).trim().replace(/^['"]|['"]$/g, '');
     const mimeType = (request.headers.get('content-type') || '').split(';')[0].trim();
     const rawSize = request.headers.get('x-file-size') || request.headers.get('content-length') || '0';
     const size = Number(rawSize);
@@ -66,18 +77,19 @@ export default {
     try {
       const rules = await loadRulebook(env.RULEBOOK_URL);
       const uploaded = await uploadToGemini(request.body, {
-        apiKey: env.GEMINI_API_KEY,
+        apiKey,
         size,
         mimeType,
         displayName,
       });
 
       geminiFileName = uploaded.name;
-      const activeFile = await waitForFile(uploaded.name, env.GEMINI_API_KEY);
+      const activeFile = await waitForFile(uploaded.name, apiKey);
       const prompt = buildPrompt(rules);
-      const analysis = await generateAnalysis({
-        apiKey: env.GEMINI_API_KEY,
-        model: env.MODEL || 'gemini-3.8-flash',
+      const analysis = await generateAnalysisWithFallback({
+        apiKey,
+        primaryModel: env.MODEL || 'gemini-3.8-flash',
+        fallbackModel: env.FALLBACK_MODEL || 'gemini-3.5-flash-lite',
         fileUri: activeFile.uri,
         mimeType: activeFile.mimeType || activeFile.mime_type || mimeType,
         prompt,
@@ -90,7 +102,7 @@ export default {
       return json({ error: friendlyError(err) }, err?.status || 500, cors);
     } finally {
       if (geminiFileName) {
-        try { await deleteGeminiFile(geminiFileName, env.GEMINI_API_KEY); } catch (e) { console.warn('Gemini cleanup failed', e); }
+        try { await deleteGeminiFile(geminiFileName, apiKey); } catch (e) { console.warn('Gemini cleanup failed', e); }
       }
     }
   }
@@ -189,6 +201,27 @@ async function waitForFile(name, apiKey) {
   throw new Error('Le traitement vidéo Gemini a dépassé le délai prévu. Réessaie avec une vidéo plus courte.');
 }
 
+async function generateAnalysisWithFallback({ apiKey, primaryModel, fallbackModel, fileUri, mimeType, prompt }) {
+  const models = [...new Set([primaryModel, fallbackModel].filter(Boolean))];
+  let lastError = null;
+
+  for (const model of models) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const analysis = await generateAnalysis({ apiKey, model, fileUri, mimeType, prompt });
+        analysis.model_used = model;
+        return analysis;
+      } catch (err) {
+        lastError = err;
+        if (!isTransientModelError(err)) throw err;
+        if (attempt === 0) await sleep(1500);
+      }
+    }
+  }
+
+  throw lastError || new Error('Tous les modèles Gemini sont temporairement indisponibles.');
+}
+
 async function generateAnalysis({ apiKey, model, fileUri, mimeType, prompt }) {
   const res = await fetch(`${GOOGLE_BASE}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
@@ -214,6 +247,11 @@ async function generateAnalysis({ apiKey, model, fileUri, mimeType, prompt }) {
   return parseJsonText(text);
 }
 
+function isTransientModelError(err) {
+  const msg = String(err?.message || err || '');
+  return [429, 500, 502, 503, 504].includes(Number(err?.status)) || /high demand|temporar|overload|unavailable|resource exhausted|try again later/i.test(msg);
+}
+
 function buildPrompt(rules) {
   const principles = (rules?.principles || []).map(p => `- ${p.id || 'signal'}: ${p.rule || ''} | preuve: ${p.evidence || ''}`).join('\n');
   return `Tu es le moteur d’analyse de Viral+. Analyse CETTE VIDÉO RÉELLE destinée à Instagram Reels. Tu n’as pas accès à l’algorithme privé de Meta. Ne prétends jamais connaître ses poids secrets et ne promets jamais qu’une vidéo sera virale. Évalue uniquement son potentiel de recommandation/distribution à partir de la vidéo et du référentiel fourni.\n\nRÉFÉRENTIEL VIRAL+ / META ${rules?.version || 'unknown'}\n${rules?.methodology || ''}\n${principles}\n\nDistingue toujours : (A) éléments cohérents avec des informations officielles Meta/Instagram, (B) heuristiques créatives Viral+. Analyse réellement ce qui est visible ET audible. Si un élément n’est pas détectable, écris INDETECTABLE au lieu de l’inventer.\n\nAttribue des scores de 0 à 100 pour : retention, shareability, originality, audience_relevance, spoken_hook, visual_hook, clarity, value_emotion, title, rhythm et cta. Le CTA mesure la conversion et ne doit pas être présenté comme un signal Meta de distribution.\n\nRéponds UNIQUEMENT en JSON valide avec exactement cette structure :\n{"detected_spoken_hook":"...","detected_visual_hook":"...","detected_title_text":"...","detected_cta":"...","scores":{"retention":0,"shareability":0,"originality":0,"audience_relevance":0,"spoken_hook":0,"visual_hook":0,"clarity":0,"value_emotion":0,"title":0,"rhythm":0,"cta":0},"verdict":"...","main_problem":"...","why":"...","meta_alignment":"...","recommended_hook":"...","alternative_hooks":["...","...","..."],"recommended_title":"...","recommended_cta":"...","timeline":[{"time":"0:00","status":"red","label":"Ouverture","reason":"..."}],"action_items":["..."],"confidence":{"audio":0,"visual":0,"text":0,"meta_evidence":0},"rulebook_version":"${rules?.version || 'unknown'}"}`;
@@ -233,19 +271,36 @@ async function deleteGeminiFile(name, apiKey) {
 
 async function googleError(response, fallback) {
   let detail = '';
+  let reason = '';
   try {
     const body = await response.json();
     detail = body?.error?.message || body?.message || '';
+    reason = body?.error?.status || body?.error?.details?.[0]?.reason || '';
   } catch {}
   const err = new Error(detail ? `${fallback} ${detail}` : fallback);
   err.status = response.status >= 400 && response.status < 600 ? response.status : 500;
+  err.googleReason = reason;
   return err;
+}
+
+function classifyGoogleAuth(msg) {
+  const s = String(msg || '');
+  if (/reported as leaked|leaked/i.test(s)) return 'KEY_BLOCKED_AS_LEAKED';
+  if (/project has been denied access|denied access/i.test(s)) return 'PROJECT_DENIED';
+  if (/api key not valid|invalid api key|API_KEY_INVALID/i.test(s)) return 'KEY_INVALID';
+  if (/access_token_type_unsupported/i.test(s)) return 'AUTH_KEY_FORMAT_OR_COPY_ERROR';
+  if (/permission|unauth|forbidden/i.test(s)) return 'PERMISSION_DENIED';
+  return 'AUTH_ERROR';
 }
 
 function friendlyError(err) {
   const msg = String(err?.message || err || 'Erreur inconnue');
+  if (/high demand|temporar|overload|unavailable|try again later/i.test(msg)) return 'Les modèles Gemini sont momentanément saturés. Viral+ a déjà essayé le modèle de secours ; réessaie dans quelques minutes.';
   if (/quota|resource exhausted|429/i.test(msg)) return 'Quota Gemini temporairement atteint. Réessaie dans quelques minutes.';
-  if (/api key|permission|unauth|401|403/i.test(msg)) return 'La clé Gemini du backend doit être vérifiée.';
+  if (/reported as leaked|leaked/i.test(msg)) return 'La clé Gemini a été bloquée par Google car elle est considérée comme exposée. Crée une nouvelle clé Auth dans Google AI Studio puis remplace GEMINI_API_KEY dans Cloudflare.';
+  if (/project has been denied access|denied access/i.test(msg)) return 'Google refuse actuellement l’accès Gemini à ce projet. Dans Google AI Studio, crée ou sélectionne un autre projet puis génère une nouvelle clé Auth.';
+  if (/api key not valid|invalid api key|API_KEY_INVALID|access_token_type_unsupported/i.test(msg)) return 'La clé Gemini est invalide, incomplète ou obsolète. Crée une nouvelle clé Auth dans Google AI Studio et remplace GEMINI_API_KEY dans Cloudflare.';
+  if (/api key|permission|unauth|401|403/i.test(msg)) return 'Gemini refuse la clé du backend. Utilise une nouvelle clé Auth créée dans Google AI Studio (format actuel), puis remplace le secret GEMINI_API_KEY dans Cloudflare.';
   return msg;
 }
 
