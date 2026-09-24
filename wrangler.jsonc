@@ -6,6 +6,7 @@
   "vars": {
     "ALLOWED_ORIGIN": "https://madanesliav04-droid.github.io",
     "RULEBOOK_URL": "https://madanesliav04-droid.github.io/-ReelScore/meta-rules.json",
-    "MODEL": "gemini-3.8-flash"
+    "MODEL": "gemini-3.8-flash",
+    "FALLBACK_MODEL": "gemini-3.5-flash-lite"
   }
 }
