@@ -16,7 +16,7 @@ const W = {
   rhythm: 0
 };
 
-const SCORE_VERSION = 'vp-score-2-strict';
+const SCORE_VERSION = 'vp-score-2-stable';
 
 export default {
   async fetch(request, env) {
@@ -35,7 +35,7 @@ export default {
         model:env.MODEL || 'gemini-3.8-flash',
         fallback_model:env.FALLBACK_MODEL || 'gemini-3.5-flash-lite',
         score_version:SCORE_VERSION,
-        build_version:'2026-10-04-analysis-hardening-1',
+        build_version:'2026-10-04-score-stability-1',
         gemini_secret_configured:Boolean(env.GEMINI_API_KEY),
         supabase_configured:Boolean(env.SUPABASE_URL && env.SUPABASE_PUBLISHABLE_KEY)
       },200,cors);
