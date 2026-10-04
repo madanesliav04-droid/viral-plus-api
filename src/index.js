@@ -21,7 +21,8 @@ const SCORE_VERSION = 'vp-score-2-strict';
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
-    const cors = corsHeaders(origin, env.ALLOWED_ORIGIN);
+    const productionOrigin = 'https://madanesliav04-droid.github.io';
+    const cors = corsHeaders(origin, env.ALLOWED_ORIGIN, productionOrigin);
 
     if (request.method === 'OPTIONS') return new Response(null, {status:204, headers:cors});
 
@@ -40,7 +41,7 @@ export default {
     }
 
     if (url.pathname !== '/analyze' || request.method !== 'POST') return json({error:'Not found'},404,cors);
-    if (origin && env.ALLOWED_ORIGIN && origin !== env.ALLOWED_ORIGIN) return json({error:'Origin non autorisée.'},403,cors);
+    if (origin && !isAllowedOrigin(origin, env.ALLOWED_ORIGIN, productionOrigin)) return json({error:'Origin non autorisée.'},403,cors);
     if (!env.GEMINI_API_KEY) return json({error:'Le moteur d’analyse n’est pas configuré.'},500,cors);
     if (!env.SUPABASE_URL || !env.SUPABASE_PUBLISHABLE_KEY) return json({error:'Le backend Viral+ n’est pas configuré.'},500,cors);
 
@@ -166,8 +167,12 @@ export default {
   }
 };
 
-function corsHeaders(origin,allowedOrigin) {
-  const allowed = origin && allowedOrigin && origin === allowedOrigin ? origin : (allowedOrigin || '*');
+function isAllowedOrigin(origin,allowedOrigin,productionOrigin) {
+  if (!origin) return true;
+  return [allowedOrigin,productionOrigin].filter(Boolean).includes(origin);
+}
+function corsHeaders(origin,allowedOrigin,productionOrigin) {
+  const allowed = isAllowedOrigin(origin,allowedOrigin,productionOrigin) ? (origin || allowedOrigin || productionOrigin || '*') : (allowedOrigin || productionOrigin || '*');
   return {'Access-Control-Allow-Origin':allowed,'Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'Authorization,Content-Type,X-File-Name,X-File-Size,X-Video-Mime-Type,X-Reanalysis,X-Baseline-Analysis-Id','Access-Control-Max-Age':'86400','Vary':'Origin'};
 }
 function json(data,status=200,extra={}) { return new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...extra}}); }
