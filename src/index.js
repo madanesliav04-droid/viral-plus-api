@@ -148,6 +148,7 @@ export default {
       const row = {
         user_id:user.id,
         video_name:fileName,
+        video_sha256:videoSha256,
         final_score:scoreResult.final_score,
         score_version:scoreVersion,
         model_used:analysis.model_used || null,
