@@ -253,22 +253,21 @@ async function generateAnalysisWithFallback({apiKey,primaryModel,fallbackModel,f
     for(let attempt=0;attempt<2;attempt++){
       try{
         const analysis=await generateAnalysis({apiKey,model,fileUri,mimeType,prompt});
+        validateAnalysis(analysis);
         analysis.model_used=model;
         return analysis;
       }catch(err){
         lastError=err;
-        if(!isTransientModelError(err)) throw err;
-        if(attempt===0) await sleep(1500);
+        if(attempt===0 && isTransientModelError(err)) await sleep(1500);
+        else break;
       }
     }
   }
   throw lastError || new Error('Tous les modèles Gemini sont temporairement indisponibles.');
 }
 async function generateAnalysis({apiKey,model,fileUri,mimeType,prompt}) {
-  const generationConfig = {
-    responseMimeType:'application/json',
-    thinkingConfig:{thinkingLevel:'low'}
-  };
+  const generationConfig = {responseMimeType:'application/json'};
+  if (/gemini-3\.8-flash$/i.test(String(model))) generationConfig.thinkingConfig={thinkingLevel:'low'};
   const res=await fetch(`${GOOGLE_BASE}/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
     method:'POST',
     headers:{'x-goog-api-key':apiKey,'Content-Type':'application/json'},
@@ -288,7 +287,15 @@ function friendlyError(err){
   if(/timed out|timeout|dépassé le délai/i.test(msg))return 'L’analyse a pris trop de temps. Réessaie avec une vidéo plus courte.';
   return msg.slice(0,500);
 }
-function isTransientModelError(err){const msg=String(err?.message||err||'');return [408,429,500,502,503,504].includes(Number(err?.status))||/high demand|temporar|overload|unavailable|resource exhausted|try again later/i.test(msg);}
+function isTransientModelError(err){const msg=String(err?.message||err||'');return [408,409,429,500,502,503,504].includes(Number(err?.status))||/high demand|temporar|overload|unavailable|resource exhausted|try again later|deadline/i.test(msg);}
+function validateAnalysis(a){
+  if(!a||typeof a!=='object')throw new Error('Gemini a renvoyé un diagnostic invalide.');
+  if(!a.scores||typeof a.scores!=='object')throw new Error('Diagnostic incomplet : scores absents.');
+  const required=['retention','shareability','originality','audience_relevance','spoken_hook','visual_hook','clarity','value_emotion'];
+  if(required.some(k=>!Number.isFinite(Number(a.scores[k]))))throw new Error('Diagnostic incomplet : critères de score manquants.');
+  if(!String(a.main_problem||'').trim()||!String(a.why||'').trim())throw new Error('Diagnostic incomplet : problème principal non justifié.');
+  if(!Array.isArray(a.action_items)||a.action_items.length<3)throw new Error('Diagnostic incomplet : corrections insuffisantes.');
+}
 
 function buildPrompt(rules) {
   const principles=(rules?.principles||[]).map(p=>`- ${p.id||'signal'} [${p.status||'unknown'}]: ${p.rule||''} | preuve: ${p.evidence||''}`).join('\\n');
@@ -382,7 +389,20 @@ Réponds UNIQUEMENT en JSON valide avec exactement:
   "rulebook_version":"${rules?.version||'unknown'}"
 }
 
-Ne mets pas de scores arbitraires pour remplir les champs. Si tu ne peux pas justifier un score, baisse-le et explique pourquoi.`;
+Ne mets pas de scores arbitraires pour remplir les champs. Si tu ne peux pas justifier un score, baisse-le et explique pourquoi.
+
+DIAGNOSTIC OBLIGATOIRE
+- Donne UN problème principal qui explique la plus grande perte de potentiel.
+- Donne au moins 3 corrections directement exécutables, classées par priorité.
+- Chaque correction doit pointer vers un moment précis quand c’est possible, expliquer le mécanisme de perte d’attention et proposer une modification concrète.
+- Pour le hook, écris une vraie nouvelle phrase/structure que le créateur peut tourner, pas "améliore le hook".
+- Pour la structure, indique ce qu’il faut couper, déplacer, raccourcir ou révéler plus tôt.
+- Pour le partage, identifie la personne à qui la vidéo serait envoyée et pourquoi; sinon indique INDETECTABLE.
+- Pour l’originalité, distingue "angle original" de simple qualité de montage.
+- Pour chaque élément non observable, utilise INDETECTABLE.
+- Le diagnostic doit répondre à: "Pourquoi cette vidéo risque-t-elle de ne pas être suffisamment recommandée/partagée, et qu'est-ce que je change dans la prochaine version ?"
+- Ne promets jamais la viralité. Le produit prédit un potentiel éditorial à partir de signaux observables et d'heuristiques Viral+.
+- timeline doit contenir 5 à 8 points couvrant l'ouverture, la progression et la sortie, pas uniquement 0:00.`;
 }
 
 function parseJsonText(text){let cleaned=text.trim().replace(/^\`\`\`(?:json)?\\s*/i,'').replace(/\\s*\`\`\`$/i,'');const start=cleaned.indexOf('{'),end=cleaned.lastIndexOf('}');if(start>=0&&end>start)cleaned=cleaned.slice(start,end+1);return JSON.parse(cleaned);}
