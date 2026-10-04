@@ -57,6 +57,7 @@ export default {
     try { body = await request.json(); } catch { return json({error:'Requête d’analyse invalide.'},400,cors); }
 
     const storageUrl = String(body?.storage_url || '');
+    const videoSha256 = normalizeSha256(body?.video_sha256);
     if (!storageUrl || !storageUrl.startsWith(env.SUPABASE_URL + '/storage/')) {
       return json({error:'URL de stockage vidéo invalide.'},400,cors);
     }
