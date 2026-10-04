@@ -41,6 +41,9 @@ export default {
     if (!storageUrl || !storageUrl.startsWith(env.SUPABASE_URL + '/storage/')) {
       return json({error:'URL de stockage vidéo invalide.'},400,cors);
     }
+    if (!storageBelongsToUser(storageUrl, user.id)) {
+      return json({error:'Cette vidéo n’appartient pas à ce compte.',code:'VIDEO_ACCESS_DENIED'},403,cors);
+    }
 
     const mimeType = String(request.headers.get('X-Video-Mime-Type') || body?.mime_type || 'video/mp4').split(';')[0].trim();
     const size = Number(request.headers.get('X-File-Size') || body?.size || 0);
@@ -151,6 +154,16 @@ function safeName(value) { return String(value || 'video.mp4').replace(/[\r\n]/g
 function decodeURIComponentSafe(value) { try{return decodeURIComponent(value)}catch{return value} }
 function safeUuid(v) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v||'')) ? String(v) : null; }
 
+function storageBelongsToUser(storageUrl,userId) {
+  try {
+    const u=new URL(storageUrl);
+    const marker='/storage/v1/object/sign/viralplus-videos/';
+    const i=u.pathname.indexOf(marker);
+    if(i===-1) return false;
+    const objectPath=decodeURIComponent(u.pathname.slice(i+marker.length));
+    return objectPath.startsWith(String(userId)+'/');
+  } catch { return false; }
+}
 async function supabaseUser(env,auth) {
   const r = await fetch(`${env.SUPABASE_URL}/auth/v1/user`,{headers:{apikey:env.SUPABASE_PUBLISHABLE_KEY,Authorization:auth}});
   if (!r.ok) throw new Error('AUTH_REQUIRED');
