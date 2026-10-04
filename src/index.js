@@ -91,7 +91,7 @@ export default {
     let geminiFileName = null;
     try {
       const rules = await loadRulebook(env.RULEBOOK_URL);
-      const stored = await fetch(storageUrl);
+      const stored = await fetchWithTimeout(storageUrl,{},60000);
       if (!stored.ok || !stored.body) throw new Error('Impossible de récupérer la vidéo depuis le stockage.');
 
       const uploaded = await uploadToGemini(stored.body,{apiKey:String(env.GEMINI_API_KEY).trim(),size,mimeType,displayName:fileName});
@@ -221,15 +221,15 @@ function fallbackRules() {
 }
 
 async function uploadToGemini(body,{apiKey,size,mimeType,displayName}) {
-  const start = await fetch(`${GOOGLE_BASE}/upload/v1beta/files`,{
+  const start = await fetchWithTimeout(`${GOOGLE_BASE}/upload/v1beta/files`,{
     method:'POST',
     headers:{'x-goog-api-key':apiKey,'X-Goog-Upload-Protocol':'resumable','X-Goog-Upload-Command':'start','X-Goog-Upload-Header-Content-Length':String(size),'X-Goog-Upload-Header-Content-Type':mimeType,'Content-Type':'application/json'},
     body:JSON.stringify({file:{display_name:displayName}})
-  });
+  },120000);
   if (!start.ok) throw await googleError(start,'Impossible de préparer l’upload Gemini.');
   const uploadUrl = start.headers.get('x-goog-upload-url');
   if (!uploadUrl) throw new Error('Gemini n’a pas renvoyé d’URL d’upload.');
-  const uploadedRes = await fetch(uploadUrl,{method:'POST',headers:{'Content-Type':mimeType,'X-Goog-Upload-Offset':'0','X-Goog-Upload-Command':'upload, finalize'},body});
+  const uploadedRes = await fetchWithTimeout(uploadUrl,{method:'POST',headers:{'Content-Type':mimeType,'X-Goog-Upload-Offset':'0','X-Goog-Upload-Command':'upload, finalize'},body},180000);
   if (!uploadedRes.ok) throw await googleError(uploadedRes,'Échec de l’upload vidéo vers Gemini.');
   const uploaded = await uploadedRes.json();
   if (!uploaded?.file?.name || !uploaded?.file?.uri) throw new Error('Réponse d’upload Gemini incomplète.');
@@ -237,7 +237,7 @@ async function uploadToGemini(body,{apiKey,size,mimeType,displayName}) {
 }
 async function waitForFile(name,apiKey) {
   for(let i=0;i<36;i++){
-    const res=await fetch(`${GOOGLE_BASE}/v1beta/${name}`,{headers:{'x-goog-api-key':apiKey}});
+    const res=await fetchWithTimeout(`${GOOGLE_BASE}/v1beta/${name}`,{headers:{'x-goog-api-key':apiKey}},20000);
     if(!res.ok) throw await googleError(res,'Impossible de vérifier la vidéo Gemini.');
     const file=await res.json();
     const state=String(file.state||'').toUpperCase();
@@ -269,16 +269,26 @@ async function generateAnalysisWithFallback({apiKey,primaryModel,fallbackModel,f
 async function generateAnalysis({apiKey,model,fileUri,mimeType,prompt}) {
   const generationConfig = {responseMimeType:'application/json'};
   if (/gemini-3\.8-flash$/i.test(String(model))) generationConfig.thinkingConfig={thinkingLevel:'low'};
-  const res=await fetch(`${GOOGLE_BASE}/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
+  const res=await fetchWithTimeout(`${GOOGLE_BASE}/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
     method:'POST',
     headers:{'x-goog-api-key':apiKey,'Content-Type':'application/json'},
     body:JSON.stringify({contents:[{role:'user',parts:[{file_data:{mime_type:mimeType,file_uri:fileUri}},{text:prompt}]}],generationConfig})
-  });
+  },120000);
   if(!res.ok) throw await googleError(res,'Gemini n’a pas pu analyser la vidéo.');
   const payload=await res.json();
   const text=(payload?.candidates||[]).flatMap(c=>c?.content?.parts||[]).map(p=>p?.text||'').join('').trim();
   if(!text) throw new Error('Gemini n’a renvoyé aucun diagnostic exploitable.');
   return parseJsonText(text);
+}
+async function fetchWithTimeout(input,options={},timeoutMs=30000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    return await fetch(input,{...options,signal:controller.signal});
+  }catch(err){
+    if(err?.name==='AbortError') throw new Error('Le moteur d’analyse a dépassé le délai prévu. Réessaie avec une vidéo plus courte.');
+    throw err;
+  }finally{clearTimeout(timer)}
 }
 function friendlyError(err){
   const msg=String(err?.message||err||'').trim();
