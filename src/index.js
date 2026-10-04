@@ -265,15 +265,28 @@ async function generateAnalysisWithFallback({apiKey,primaryModel,fallbackModel,f
   throw lastError || new Error('Tous les modèles Gemini sont temporairement indisponibles.');
 }
 async function generateAnalysis({apiKey,model,fileUri,mimeType,prompt}) {
+  const generationConfig = {
+    responseMimeType:'application/json',
+    thinkingConfig:{thinkingLevel:'low'}
+  };
   const res=await fetch(`${GOOGLE_BASE}/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
-    method:'POST',headers:{'x-goog-api-key':apiKey,'Content-Type':'application/json'},
-    body:JSON.stringify({contents:[{role:'user',parts:[{file_data:{mime_type:mimeType,file_uri:fileUri}},{text:prompt}]}],generationConfig:{temperature:0,responseMimeType:'application/json'}})
+    method:'POST',
+    headers:{'x-goog-api-key':apiKey,'Content-Type':'application/json'},
+    body:JSON.stringify({contents:[{role:'user',parts:[{file_data:{mime_type:mimeType,file_uri:fileUri}},{text:prompt}]}],generationConfig})
   });
   if(!res.ok) throw await googleError(res,'Gemini n’a pas pu analyser la vidéo.');
   const payload=await res.json();
   const text=(payload?.candidates||[]).flatMap(c=>c?.content?.parts||[]).map(p=>p?.text||'').join('').trim();
   if(!text) throw new Error('Gemini n’a renvoyé aucun diagnostic exploitable.');
   return parseJsonText(text);
+}
+function friendlyError(err){
+  const msg=String(err?.message||err||'').trim();
+  if(!msg)return 'Analyse impossible. Réessaie dans quelques instants.';
+  if(/AUTH_REQUIRED/i.test(msg))return 'Session expirée. Reconnecte-toi.';
+  if(/Failed to fetch|NetworkError|Load failed/i.test(msg))return 'Connexion au moteur d’analyse impossible. Vérifie ta connexion puis réessaie.';
+  if(/timed out|timeout|dépassé le délai/i.test(msg))return 'L’analyse a pris trop de temps. Réessaie avec une vidéo plus courte.';
+  return msg.slice(0,500);
 }
 function isTransientModelError(err){const msg=String(err?.message||err||'');return [408,429,500,502,503,504].includes(Number(err?.status))||/high demand|temporar|overload|unavailable|resource exhausted|try again later/i.test(msg);}
 
