@@ -75,6 +75,19 @@ export default {
     if (!Number.isFinite(size) || size <= 0) return json({error:'Taille de vidéo invalide.'},400,cors);
     if (size > MAX_BYTES) return json({error:'Vidéo trop lourde : 95 Mo maximum.'},413,cors);
 
+    // Exact-content cache: identical uploads from the same user reuse the
+    // persisted analysis. This removes meaningless model-to-model drift and
+    // avoids charging a second credit for the same exact video.
+    if (videoSha256 && !isReanalysis) {
+      const cached = await findCachedAnalysis(env,auth,user.id,videoSha256);
+      if (cached?.result_json) {
+        const result = JSON.parse(JSON.stringify(cached.result_json));
+        result.cached = true;
+        result.deduplication = 'exact_video_match';
+        return json(result,200,cors);
+      }
+    }
+
     let credit;
     try {
       const entRaw = await rpc(env,auth,'viralplus_get_entitlement',{});
