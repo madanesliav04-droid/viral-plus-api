@@ -1,6 +1,22 @@
 const GOOGLE_BASE = 'https://generativelanguage.googleapis.com';
 const MAX_BYTES = 95 * 1024 * 1024;
-const W = {retention:.24,shareability:.16,originality:.15,audience_relevance:.12,spoken_hook:.11,visual_hook:.08,clarity:.05,value_emotion:.04,title:.03,rhythm:.02,cta:0};
+
+// These are Viral+ diagnostic weights, NOT Meta's private ranking weights.
+// They are intentionally concentrated on attention/relevance/originality and
+// exclude CTA from the distribution score.
+const W = {
+  retention: .27,
+  audience_relevance: .18,
+  originality: .17,
+  shareability: .14,
+  spoken_hook: .09,
+  visual_hook: .06,
+  clarity: .05,
+  value_emotion: .04,
+  rhythm: 0
+};
+
+const SCORE_VERSION = 'vp-score-2-strict';
 
 export default {
   async fetch(request, env) {
@@ -17,6 +33,7 @@ export default {
         provider:'gemini-files',
         model:env.MODEL || 'gemini-3.8-flash',
         fallback_model:env.FALLBACK_MODEL || 'gemini-3.5-flash-lite',
+        score_version:SCORE_VERSION,
         gemini_secret_configured:Boolean(env.GEMINI_API_KEY),
         supabase_configured:Boolean(env.SUPABASE_URL && env.SUPABASE_PUBLISHABLE_KEY)
       },200,cors);
@@ -90,14 +107,18 @@ export default {
       analysis.rulebook_version = analysis.rulebook_version || rules.version || 'unknown';
       analysis.model_used = analysis.model_used || env.MODEL || 'gemini-3.8-flash';
 
-      const finalScore = scoreFinal(analysis.scores || {});
+      const scoreResult = scoreFinal(analysis);
       const rulebookVersion = analysis.rulebook_version;
-      const scoreVersion = `${rulebookVersion}|vp-score-1`;
-      const status = finalScore >= 78 ? 'ready' : finalScore >= 60 ? 'almost' : 'rework';
+      const scoreVersion = `${rulebookVersion}|${SCORE_VERSION}`;
+      const status = scoreResult.final_score >= 78 ? 'ready' : scoreResult.final_score >= 60 ? 'almost' : 'rework';
       const filtered = filterForPlan(analysis,credit.plan || 'free');
-      filtered.final_score = finalScore;
+
+      filtered.final_score = scoreResult.final_score;
+      filtered.raw_score = scoreResult.raw_score;
       filtered.score_version = scoreVersion;
       filtered.status = status;
+      filtered.score_explanation = scoreResult.explanation;
+      filtered.score_guardrails = scoreResult.guardrails;
       filtered.plan = credit.plan || 'free';
       filtered.entitlement = {
         plan:credit.plan,
@@ -111,7 +132,7 @@ export default {
       const row = {
         user_id:user.id,
         video_name:fileName,
-        final_score:finalScore,
+        final_score:scoreResult.final_score,
         score_version:scoreVersion,
         model_used:analysis.model_used || null,
         rulebook_version:rulebookVersion,
@@ -241,7 +262,7 @@ async function generateAnalysisWithFallback({apiKey,primaryModel,fallbackModel,f
 async function generateAnalysis({apiKey,model,fileUri,mimeType,prompt}) {
   const res=await fetch(`${GOOGLE_BASE}/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
     method:'POST',headers:{'x-goog-api-key':apiKey,'Content-Type':'application/json'},
-    body:JSON.stringify({contents:[{role:'user',parts:[{file_data:{mime_type:mimeType,file_uri:fileUri}},{text:prompt}]}],generationConfig:{temperature:0.2,responseMimeType:'application/json'}})
+    body:JSON.stringify({contents:[{role:'user',parts:[{file_data:{mime_type:mimeType,file_uri:fileUri}},{text:prompt}]}],generationConfig:{temperature:0,responseMimeType:'application/json'}})
   });
   if(!res.ok) throw await googleError(res,'Gemini n’a pas pu analyser la vidéo.');
   const payload=await res.json();
@@ -250,15 +271,151 @@ async function generateAnalysis({apiKey,model,fileUri,mimeType,prompt}) {
   return parseJsonText(text);
 }
 function isTransientModelError(err){const msg=String(err?.message||err||'');return [408,429,500,502,503,504].includes(Number(err?.status))||/high demand|temporar|overload|unavailable|resource exhausted|try again later/i.test(msg);}
+
 function buildPrompt(rules) {
-  const principles=(rules?.principles||[]).map(p=>`- ${p.id||'signal'}: ${p.rule||''} | preuve: ${p.evidence||''}`).join('\\n');
-  return `Tu es le moteur d’analyse de Viral+. Analyse CETTE VIDÉO RÉELLE destinée à Instagram Reels. Tu n’as pas accès à l’algorithme privé de Meta. Ne prétends jamais connaître ses poids secrets et ne promets jamais qu’une vidéo sera virale. Évalue uniquement son potentiel de recommandation/distribution à partir de la vidéo et du référentiel fourni.\\n\\nRÉFÉRENTIEL VIRAL+ / META ${rules?.version||'unknown'}\\n${rules?.methodology||''}\\n${principles}\\n\\nDistingue toujours : (A) éléments cohérents avec des informations officielles Meta/Instagram, (B) heuristiques créatives Viral+. Analyse réellement ce qui est visible ET audible. Si un élément n’est pas détectable, écris INDETECTABLE au lieu de l’inventer.\\n\\nAttribue des scores de 0 à 100 pour : retention, shareability, originality, audience_relevance, spoken_hook, visual_hook, clarity, value_emotion, title, rhythm et cta. Le CTA mesure la conversion et ne doit pas être présenté comme un signal Meta de distribution.\\n\\nRéponds UNIQUEMENT en JSON valide avec exactement cette structure :\\n{"detected_spoken_hook":"...","detected_visual_hook":"...","detected_title_text":"...","detected_cta":"...","scores":{"retention":0,"shareability":0,"originality":0,"audience_relevance":0,"spoken_hook":0,"visual_hook":0,"clarity":0,"value_emotion":0,"title":0,"rhythm":0,"cta":0},"verdict":"...","main_problem":"...","why":"...","meta_alignment":"...","recommended_hook":"...","alternative_hooks":["...","...","..."],"recommended_title":"...","recommended_cta":"...","timeline":[{"time":"0:00","status":"red","label":"Ouverture","reason":"..."}],"action_items":["..."],"confidence":{"audio":0,"visual":0,"text":0,"meta_evidence":0},"rulebook_version":"${rules?.version||'unknown'}"} `;
+  const principles=(rules?.principles||[]).map(p=>`- ${p.id||'signal'} [${p.status||'unknown'}]: ${p.rule||''} | preuve: ${p.evidence||''}`).join('\\n');
+  return `Tu es le moteur d’analyse de Viral+. Tu analyses une vidéo Instagram Reels à partir de ce qui est réellement visible et audible.
+
+RÈGLE ABSOLUE D’HONNÊTETÉ
+- Tu n’as PAS accès à l’algorithme privé de Meta.
+- Tu ne connais PAS les poids privés de classement.
+- Tu ne dois jamais écrire ou suggérer "selon l’algorithme Instagram" comme si tu connaissais sa formule.
+- Une vidéo seule ne permet PAS de connaître sa vraie rétention, son watch time, ses envois, ses likes, ni sa performance réelle. Ces métriques doivent être traitées comme NON OBSERVÉES.
+- Quand une information n’est pas détectable dans la vidéo, écris INDETECTABLE. Ne l’invente jamais.
+
+OBJECTIF
+Produis un diagnostic sévère du potentiel de recommandation, pas une note de "qualité générale". Une vidéo propre, utile ou bien montée peut rester faible si elle ne donne pas une raison forte de continuer à regarder.
+
+RÉFÉRENTIEL ${rules?.version||'unknown'}
+${rules?.methodology||''}
+${principles}
+
+DISTINCTION OBLIGATOIRE
+1. META/OFFICIAL: seulement les éléments explicitement documentés par Meta.
+2. VIRAL+/HEURISTIC: inférences créatives destinées à diagnostiquer le contenu.
+Ne transforme jamais une heuristique en "facteur officiel Meta".
+
+NOTATION STRICTE
+Pour chaque score, utilise 0-100 avec ces ancres:
+0-19 = absent / catastrophique
+20-39 = très faible
+40-59 = faible
+60-69 = moyen
+70-79 = bon mais avec défauts
+80-89 = très fort et clairement démontré
+90-100 = exceptionnel, rare, plusieurs preuves convergentes
+
+IMPORTANT: 80+ n’est autorisé que si tu peux citer une preuve concrète observable dans la vidéo. Si la preuve est faible, reste sous 80. Ne donne jamais un score élevé "par défaut".
+
+CRITÈRES
+- retention: potentiel de maintien de l’attention à partir de la structure, du rythme et de la progression. C’est une HEURISTIQUE, pas la vraie watch time.
+- audience_relevance: clarté du public visé et force de la promesse pour ce public. HEURISTIQUE.
+- originality: originalité observable et absence de simple recyclage. META-ALIGNED; ne prétends pas détecter toute réutilisation externe.
+- shareability: raison concrète pour laquelle quelqu’un enverrait la vidéo à une autre personne. HEURISTIQUE.
+- spoken_hook: force de l’ouverture parlée si elle existe. HEURISTIQUE.
+- visual_hook: force de l’ouverture visuelle. HEURISTIQUE.
+- clarity: compréhension immédiate du sujet et de la promesse. HEURISTIQUE.
+- value_emotion: intérêt/valeur/émotion réellement délivré. HEURISTIQUE.
+- rhythm: diagnostic éditorial secondaire; NE PÈSE PAS dans le score final.
+- cta: conversion uniquement; NE PÈSE PAS dans le score de recommandation.
+
+RÈGLE DE SÉVÉRITÉ
+Si la vidéo est correcte mais remplaçable, générique, lente, prévisible ou peu spécifique, note-la basse.
+Ne récompense pas la qualité de production à la place de l’intérêt.
+Ne récompense pas la présence d’un CTA.
+Ne récompense pas le simple fait que le sujet soit intéressant.
+Un hook clair mais banal n’est pas un hook fort.
+Une vidéo qui explique bien mais ne crée pas de tension/curiosité peut rester moyenne.
+Une vidéo sans données de compte ne peut jamais être décrite comme ayant une rétention "prouvée".
+
+RÉPONSE JSON
+Réponds UNIQUEMENT en JSON valide avec exactement:
+{
+  "detected_spoken_hook":"...",
+  "detected_visual_hook":"...",
+  "detected_title_text":"...",
+  "detected_cta":"...",
+  "scores":{
+    "retention":0,"shareability":0,"originality":0,"audience_relevance":0,
+    "spoken_hook":0,"visual_hook":0,"clarity":0,"value_emotion":0,
+    "title":0,"rhythm":0,"cta":0
+  },
+  "score_evidence":{
+    "retention":"preuve observable...",
+    "shareability":"preuve observable...",
+    "originality":"preuve observable...",
+    "audience_relevance":"preuve observable...",
+    "spoken_hook":"preuve observable...",
+    "visual_hook":"preuve observable...",
+    "clarity":"preuve observable...",
+    "value_emotion":"preuve observable..."
+  },
+  "verdict":"...",
+  "main_problem":"...",
+  "why":"...",
+  "meta_alignment":"...",
+  "recommended_hook":"...",
+  "alternative_hooks":["...","...","..."],
+  "recommended_title":"...",
+  "recommended_cta":"...",
+  "timeline":[{"time":"0:00","status":"red","label":"Ouverture","reason":"..."}],
+  "action_items":["..."],
+  "confidence":{"audio":0,"visual":0,"text":0,"meta_evidence":0},
+  "rulebook_version":"${rules?.version||'unknown'}"
 }
+
+Ne mets pas de scores arbitraires pour remplir les champs. Si tu ne peux pas justifier un score, baisse-le et explique pourquoi.`;
+}
+
 function parseJsonText(text){let cleaned=text.trim().replace(/^\`\`\`(?:json)?\\s*/i,'').replace(/\\s*\`\`\`$/i,'');const start=cleaned.indexOf('{'),end=cleaned.lastIndexOf('}');if(start>=0&&end>start)cleaned=cleaned.slice(start,end+1);return JSON.parse(cleaned);}
-async function deleteGeminiFile(name,apiKey){await fetch(`${GOOGLE_BASE}/v1beta/${name}`,{method:'DELETE',headers:{'x-goog-api-key':apiKey}});}
-async function googleError(response,fallback){let detail='',reason='';try{const body=await response.json();detail=body?.error?.message||body?.message||'';reason=body?.error?.status||body?.error?.details?.[0]?.reason||'';}catch{}const err=new Error(detail?`${fallback} ${detail}`:fallback);err.status=response.status>=400&&response.status<600?response.status:500;err.googleReason=reason;return err;}
-function friendlyError(err){const msg=String(err?.message||err||'Erreur inconnue');if(/high demand|temporar|overload|unavailable|try again later/i.test(msg))return'Les modèles Gemini sont momentanément saturés. Viral+ a déjà essayé le modèle de secours ; réessaie dans quelques minutes.';if(/quota|resource exhausted|429/i.test(msg))return'Quota Gemini temporairement atteint. Réessaie dans quelques minutes.';if(/reported as leaked|leaked/i.test(msg))return'La clé Gemini a été bloquée par Google car elle est considérée comme exposée. Crée une nouvelle clé Auth dans Google AI Studio puis remplace GEMINI_API_KEY dans Cloudflare.';if(/project has been denied access|denied access/i.test(msg))return'Google refuse actuellement l’accès Gemini à ce projet. Crée ou sélectionne un autre projet dans Google AI Studio puis génère une nouvelle clé Auth.';if(/api key not valid|invalid api key|API_KEY_INVALID|access_token_type_unsupported/i.test(msg))return'La clé Gemini est invalide, incomplète ou obsolète. Crée une nouvelle clé Auth dans Google AI Studio et remplace GEMINI_API_KEY dans Cloudflare.';if(/api key|permission|unauth|401|403/i.test(msg))return'Gemini refuse la clé du backend. Vérifie la clé Auth Gemini dans Cloudflare.';return msg;}
-function scoreFinal(scores){let total=0,sum=0;for(const[k,w]of Object.entries(W)){total+=w;sum+=(Number(scores?.[k])||0)*w}return Math.round(Math.max(0,Math.min(100,total?sum/total:0)));}
+
+function scoreFinal(analysis){
+  const scores=analysis?.scores||{};
+  let raw=0,sum=0;
+  for(const [k,w] of Object.entries(W)){
+    sum+=w;
+    raw+=(clampScore(scores[k]))*w;
+  }
+  raw = Math.round(raw / sum);
+
+  const evidence=analysis?.score_evidence||{};
+  const guardrails=[];
+  let penalty=0;
+
+  for(const k of Object.keys(W)){
+    if (!W[k]) continue;
+    const n=clampScore(scores[k]);
+    const ev=String(evidence[k]||'').trim();
+    if (!ev || /^INDETECTABLE$/i.test(ev)) {
+      penalty += W[k] * 6;
+      guardrails.push(`${k}: evidence absente`);
+    }
+    if (n >= 80 && (!ev || ev.length < 25)) {
+      penalty += 2;
+      guardrails.push(`${k}: score 80+ sans preuve suffisamment détaillée`);
+    }
+  }
+
+  // A video-only analysis cannot prove real performance metrics.
+  // Keep the score explicitly in the "potential" category and prevent
+  // unsupported exceptional scores from reaching the UI.
+  if (raw >= 85) {
+    const strongEvidenceCount = Object.values(evidence).filter(v => String(v||'').trim().length >= 40).length;
+    if (strongEvidenceCount < 5) {
+      raw = 79;
+      guardrails.push('plafond: potentiel exceptionnel non suffisamment démontré par la vidéo seule');
+    }
+  }
+
+  const finalScore=Math.round(Math.max(0,Math.min(100,raw-penalty)));
+  return {
+    raw_score:raw,
+    final_score:finalScore,
+    explanation:`Score calculé par le moteur déterministe ${SCORE_VERSION}. Les poids sont propres à Viral+ et ne sont pas les poids privés de Meta. Les pénalités sanctionnent les scores non étayés.`,
+    guardrails
+  };
+}
+function clampScore(v){const n=Number(v);return Number.isFinite(n)?Math.max(0,Math.min(100,Math.round(n))):0;}
 function firstHotspot(timeline){return timeline.find(x=>/red|orange|weak|bad/i.test(String(x?.status||'')))||timeline[0]||{};}
 function filterForPlan(analysis,plan){const c=JSON.parse(JSON.stringify(analysis||{}));if(plan==='creator'){c.locked=[];return c}c.action_items=(c.action_items||[]).slice(0,2);c.alternative_hooks=[];delete c.recommended_title;delete c.recommended_cta;c.locked=['full_corrections','alternative_hooks','recommended_title','recommended_cta','rescore','history_insights'];return c;}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
