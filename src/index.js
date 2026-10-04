@@ -195,6 +195,15 @@ function json(data,status=200,extra={}) { return new Response(JSON.stringify(dat
 function safeName(value) { return String(value || 'video.mp4').replace(/[\r\n]/g,'').slice(0,120); }
 function decodeURIComponentSafe(value) { try{return decodeURIComponent(value)}catch{return value} }
 function safeUuid(v) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v||'')) ? String(v) : null; }
+function normalizeSha256(v) { const s=String(v||'').trim().toLowerCase(); return /^[0-9a-f]{64}$/.test(s) ? s : null; }
+async function findCachedAnalysis(env,auth,userId,sha256) {
+  const q=`?select=result_json,final_score,score_version,created_at&user_id=eq.${encodeURIComponent(userId)}&video_sha256=eq.${encodeURIComponent(sha256)}&is_reanalysis=eq.false&order=created_at.desc&limit=1`;
+  const r=await fetch(`${env.SUPABASE_URL}/rest/v1/viralplus_analyses${q}`,{headers:{apikey:env.SUPABASE_PUBLISHABLE_KEY,Authorization:auth}});
+  if(!r.ok) throw new Error(`Cache lookup ${r.status}: ${await r.text()}`);
+  const rows=await r.json();
+  return Array.isArray(rows)?rows[0]:null;
+}
+
 
 function storageBelongsToUser(storageUrl,userId) {
   try {
