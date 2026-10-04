@@ -7,6 +7,8 @@
     "ALLOWED_ORIGIN": "https://madanesliav04-droid.github.io",
     "RULEBOOK_URL": "https://madanesliav04-droid.github.io/-ReelScore/meta-rules.json",
     "MODEL": "gemini-3.8-flash",
-    "FALLBACK_MODEL": "gemini-3.5-flash-lite"
+    "FALLBACK_MODEL": "gemini-3.5-flash-lite",
+    "SUPABASE_URL": "https://eiypztjpmxdiuaqxjuqx.supabase.co",
+    "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_Wl8iv037-iZ59iStDPu96A_RMn-US2C"
   }
 }
