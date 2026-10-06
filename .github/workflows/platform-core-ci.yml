@@ -1,0 +1,25 @@
+name: Platform Core CI
+on:
+  push:
+    branches: [platform-core]
+  pull_request:
+    branches: [main]
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax checks
+        run: |
+          node --check worker/src/index.mjs
+          node --check worker/src/supabase.mjs
+          node --check worker/src/gemini.mjs
+          node --check worker/src/prompt.mjs
+          node --check worker/src/scoring.mjs
+          node --check worker/src/viral-analysis.mjs
+      - name: Unit tests
+        working-directory: worker
+        run: npm test
