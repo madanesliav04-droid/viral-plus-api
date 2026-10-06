@@ -2,7 +2,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {createReadStream, createWriteStream} from 'node:fs';
-import {mkdtemp, rm, stat} from 'node:fs/promises';
+import {mkdtemp, rm, stat, writeFile} from 'node:fs/promises';
 import {pipeline} from 'node:stream/promises';
 import {Readable} from 'node:stream';
 import {spawn} from 'node:child_process';
@@ -27,6 +27,7 @@ const POLL_MS=Math.max(500,Number(process.env.POLL_MS||2500));
 const PORT=Number(process.env.PORT||3000);
 const STALE_SECONDS=Math.max(120,Number(process.env.STALE_SECONDS||360));
 const GOOGLE_BASE='https://generativelanguage.googleapis.com';
+const EDIT_RENDERER_DIR=process.env.EDIT_RENDERER_DIR || path.resolve(process.cwd(),'../edit-renderer');
 
 const SCORE_VERSION='vp-score-3-evidence';
 const WEIGHTS={
@@ -114,7 +115,7 @@ async function requeueStaleJobs(){
          error_code='WORKER_STALE',
          error='Worker heartbeat expired; job was requeued.',
          updated_at=now()
-     where kind='viral_analysis'
+     where kind in ('viral_analysis','edit_render')
        and status not in ('completed','failed','cancelled','queued')
        and heartbeat_at < now() - ($1::text || ' seconds')::interval
        and retry_count < max_retries
@@ -133,7 +134,7 @@ async function claimJob(){
     const picked=await client.query(
       `select *
        from public.processing_jobs
-       where kind='viral_analysis'
+       where kind in ('viral_analysis','edit_render')
          and status='queued'
          and next_attempt_at<=now()
        order by priority asc,created_at asc
@@ -706,11 +707,487 @@ async function processAnalysisJob(job){
   }
 }
 
-async function processJob(job){
-  if(job.kind!=='viral_analysis'){
-    const e=new Error(`Unsupported job kind: ${job.kind}`);e.code='UNSUPPORTED_JOB_KIND';throw e;
+
+function editPolicy(style){
+  const policies={
+    creator_clean:{silenceThreshold:0.62,pad:0.10,defaultCrop:'normal'},
+    codie:{silenceThreshold:0.52,pad:0.08,defaultCrop:'normal'},
+    business_viral:{silenceThreshold:0.38,pad:0.06,defaultCrop:'close'},
+    podcast_authority:{silenceThreshold:0.90,pad:0.14,defaultCrop:'normal'}
+  };
+  return policies[style]||policies.creator_clean;
+}
+
+function mergeRanges(ranges=[]){
+  const clean=ranges
+    .map(x=>({start_s:Math.max(0,Number(x.start_s||0)),end_s:Math.max(0,Number(x.end_s||0)),reason:x.reason||'cut'}))
+    .filter(x=>x.end_s>x.start_s)
+    .sort((a,b)=>a.start_s-b.start_s);
+  const out=[];
+  for(const r of clean){
+    const last=out.at(-1);
+    if(last&&r.start_s<=last.end_s+0.03){
+      last.end_s=Math.max(last.end_s,r.end_s);
+      last.reason=[last.reason,r.reason].filter(Boolean).join('+');
+    }else out.push({...r});
   }
-  await processAnalysisJob(job);
+  return out;
+}
+
+function buildRetainedSegments(duration,silences,plannerDrops,style){
+  const policy=editPolicy(style);
+  const removed=[];
+
+  for(const s of silences?.intervals||[]){
+    if(Number(s.duration_s)<policy.silenceThreshold)continue;
+    const start=Math.max(0,Number(s.start_s)+policy.pad);
+    const end=Math.min(duration,Number(s.end_s)-policy.pad);
+    if(end-start>=0.12)removed.push({start_s:start,end_s:end,reason:'silence'});
+  }
+
+  for(const d of plannerDrops||[]){
+    const start=Math.max(0,Number(d.start_s||0));
+    const end=Math.min(duration,Number(d.end_s||0));
+    const reason=String(d.reason||'').toLowerCase();
+    if(end<=start||end-start>2.5)continue;
+    if(!/(filler|hesitation|false.?start|repeat|repetition)/i.test(reason))continue;
+    removed.push({start_s:start,end_s:end,reason:'semantic_cleanup'});
+  }
+
+  const cuts=mergeRanges(removed);
+  const kept=[];
+  let cursor=0;
+  for(const cut of cuts){
+    if(cut.start_s-cursor>=0.12)kept.push({start_s:cursor,end_s:cut.start_s});
+    cursor=Math.max(cursor,cut.end_s);
+  }
+  if(duration-cursor>=0.12)kept.push({start_s:cursor,end_s:duration});
+  if(!kept.length)kept.push({start_s:0,end_s:duration});
+  return {kept,removed:cuts};
+}
+
+function overlapSeconds(aStart,aEnd,bStart,bEnd){
+  return Math.max(0,Math.min(aEnd,bEnd)-Math.max(aStart,bStart));
+}
+
+function cropForSegment(segment,cues,style,index){
+  const allowed=new Set(['normal','close','very_close','wide']);
+  let best=null,bestOverlap=0;
+  for(const cue of cues||[]){
+    const ov=overlapSeconds(segment.start_s,segment.end_s,Number(cue.start_s||0),Number(cue.end_s||cue.start_s||0));
+    if(ov>bestOverlap&&allowed.has(String(cue.crop))){
+      best=String(cue.crop);bestOverlap=ov;
+    }
+  }
+  if(best)return best;
+  if(style==='codie')return index%4===2?'very_close':index%2===1?'close':'normal';
+  if(style==='business_viral')return index%2===0?'close':'normal';
+  if(style==='podcast_authority')return index%5===3?'close':'normal';
+  return index%4===3?'close':'normal';
+}
+
+function outputOffsetForSource(kept,sourceTime){
+  let out=0;
+  for(const seg of kept){
+    if(sourceTime<seg.start_s)return null;
+    if(sourceTime<=seg.end_s)return out+(sourceTime-seg.start_s);
+    out+=seg.end_s-seg.start_s;
+  }
+  return null;
+}
+
+function captionsForTimeline(transcript,kept){
+  const captions=[];
+  for(const t of transcript||[]){
+    const sourceStart=Math.max(0,Number(t.start_s||0));
+    const sourceEnd=Math.max(sourceStart,Number(t.end_s||sourceStart));
+    const text=String(t.text||'').trim();
+    if(!text)continue;
+
+    for(const seg of kept){
+      const a=Math.max(sourceStart,seg.start_s);
+      const b=Math.min(sourceEnd,seg.end_s);
+      if(b-a<0.08)continue;
+      const outStart=outputOffsetForSource(kept,a);
+      const outEnd=outputOffsetForSource(kept,b);
+      if(outStart===null||outEnd===null)continue;
+      captions.push({
+        text,
+        startMs:Math.round(outStart*1000),
+        endMs:Math.max(Math.round(outStart*1000)+80,Math.round(outEnd*1000)),
+        timestampMs:Math.round(outStart*1000),
+        confidence:Number.isFinite(Number(t.confidence))?Number(t.confidence):null
+      });
+    }
+  }
+  return captions;
+}
+
+function buildEditPrompt({style,analysis,metrics}){
+  return \`You are the edit-planning layer of Edit+. You decide editorial changes for a short-form vertical talking-head video.
+You DO NOT render video. Return structured edit decisions only.
+
+STYLE: \${style}
+
+STYLE RULES
+- creator_clean: premium clean facecam, remove dead air, moderate narrative punch-ins, captions, minimal effects.
+- codie: facecam remains dominant; punch-ins only when narration earns them; text hierarchy; B-roll only if it proves or clarifies the sentence; no gratuitous effects.
+- business_viral: faster pacing, meaningful pattern interrupts, dynamic text, contextual B-roll, moderate sound-design cues.
+- podcast_authority: sober premium rhythm, restrained reframing, captions, occasional contextual B-roll.
+
+DETERMINISTIC MEASUREMENTS
+\${JSON.stringify(metrics,null,2)}
+
+VIRAL+ SOURCE ANALYSIS
+\${JSON.stringify(analysis||{},null,2)}
+
+ABSOLUTE RULES
+- Use actual timestamps from the uploaded video.
+- Do not invent spoken words.
+- "drop_ranges" may only mark filler words, hesitation, false starts or exact repeated takes. Never cut substantive claims just to go faster.
+- Crop changes must follow emphasis or a narrative beat, not a timer.
+- B-roll is a recommendation/query only. Never pretend an asset exists.
+- Keep facecam as the main source.
+- Return JSON only.
+
+OUTPUT
+{
+  "transcript_segments":[{"start_s":0.0,"end_s":1.2,"text":"...","confidence":0.9}],
+  "drop_ranges":[{"start_s":4.2,"end_s":4.8,"reason":"hesitation"}],
+  "crop_cues":[{"start_s":1.5,"end_s":3.2,"crop":"close","reason":"key claim"}],
+  "broll_slots":[{"start_s":8.0,"end_s":10.2,"query":"...","reason":"...","required":false}],
+  "sound_cues":[{"time_s":1.5,"kind":"subtle_hit","reason":"..."}],
+  "hook_visual":{"start_s":0.0,"end_s":2.0,"instruction":"..."},
+  "notes":["..."]
+}
+\`;
+}
+
+async function planEditWithGemini(file,mimeType,style,analysis,metrics){
+  let last=null;
+  const prompt=buildEditPrompt({style,analysis,metrics});
+  for(const model of [...new Set([PRIMARY_MODEL,FALLBACK_MODEL])]){
+    try{
+      const plan=await callGemini(model,file,mimeType,prompt);
+      if(!Array.isArray(plan.transcript_segments))plan.transcript_segments=[];
+      if(!Array.isArray(plan.drop_ranges))plan.drop_ranges=[];
+      if(!Array.isArray(plan.crop_cues))plan.crop_cues=[];
+      if(!Array.isArray(plan.broll_slots))plan.broll_slots=[];
+      if(!Array.isArray(plan.sound_cues))plan.sound_cues=[];
+      plan.model_used=model;
+      return plan;
+    }catch(error){
+      last=error;
+    }
+  }
+  throw last||new Error('Edit planning failed');
+}
+
+async function loadSourceAnalysis(job){
+  const id=job.payload?.source_analysis_id;
+  if(!id)return null;
+  const r=await query(
+    'select id,result_json,final_score,score_version from public.viralplus_analyses where id=$1 and user_id=$2 limit 1',
+    [id,job.user_id]
+  );
+  return r.rows[0]?.result_json||null;
+}
+
+async function ownEditProject(job){
+  const id=job.payload?.edit_project_id;
+  if(!id){const e=new Error('Edit project id missing');e.code='EDIT_PROJECT_MISSING';throw e}
+  const r=await query(
+    'select * from public.edit_projects where id=$1 and user_id=$2 limit 1',
+    [id,job.user_id]
+  );
+  if(!r.rows.length){const e=new Error('Edit project not found');e.code='EDIT_PROJECT_NOT_FOUND';throw e}
+  return r.rows[0];
+}
+
+function buildTimeline({probe,silence,plan,project}){
+  const style=project.style||'creator_clean';
+  const {kept,removed}=buildRetainedSegments(probe.duration_s,silence,plan.drop_ranges,style);
+  let outputCursorMs=0;
+  const segments=kept.map((seg,index)=>{
+    const durationMs=Math.max(1,Math.round((seg.end_s-seg.start_s)*1000));
+    const row={
+      sourceStartMs:Math.round(seg.start_s*1000),
+      sourceEndMs:Math.round(seg.end_s*1000),
+      outputStartMs:outputCursorMs,
+      outputEndMs:outputCursorMs+durationMs,
+      crop:cropForSegment(seg,plan.crop_cues,style,index),
+      positionX:50,
+      positionY:48,
+      transition:'cut',
+      reason:'retained_speech'
+    };
+    outputCursorMs+=durationMs;
+    return row;
+  });
+
+  return {
+    version:1,
+    fps:30,
+    width:1080,
+    height:1920,
+    style,
+    captionPreset:project.caption_preset||'modern_bold',
+    sourceDurationMs:Math.round(probe.duration_s*1000),
+    outputDurationMs:outputCursorMs,
+    segments,
+    captions:captionsForTimeline(plan.transcript_segments,kept),
+    overlays:[],
+    plannedBroll:plan.broll_slots||[],
+    soundCues:plan.sound_cues||[],
+    hookVisual:plan.hook_visual||null,
+    removedRanges:removed.map(r=>({
+      startMs:Math.round(r.start_s*1000),
+      endMs:Math.round(r.end_s*1000),
+      reason:r.reason
+    })),
+    plannerNotes:plan.notes||[],
+    plannerModel:plan.model_used||null
+  };
+}
+
+async function uploadStorageFile(bucket,objectPath,file,contentType){
+  const encoded=objectPath.split('/').map(encodeURIComponent).join('/');
+  const info=await stat(file);
+  const r=await fetch(\`\${SUPABASE_URL}/storage/v1/object/\${encodeURIComponent(bucket)}/\${encoded}\`,{
+    method:'POST',
+    headers:{
+      apikey:SERVICE_KEY,
+      Authorization:\`Bearer \${SERVICE_KEY}\`,
+      'Content-Type':contentType,
+      'Content-Length':String(info.size),
+      'x-upsert':'true'
+    },
+    body:createReadStream(file),
+    duplex:'half'
+  });
+  if(!r.ok){
+    const text=await r.text().catch(()=>'');
+    const e=new Error(\`Storage upload failed (\${r.status}): \${text.slice(0,500)}\`);
+    e.code='STORAGE_UPLOAD_FAILED';
+    throw e;
+  }
+  return info;
+}
+
+async function runEditRenderer(job,inputPropsFile,outputFile){
+  return new Promise((resolve,reject)=>{
+    const child=spawn(
+      'node',
+      ['src/render.mjs','--input',inputPropsFile,'--output',outputFile],
+      {cwd:EDIT_RENDERER_DIR,stdio:['ignore','pipe','pipe']}
+    );
+    let stdout='',stderr='',buffer='';
+    child.stdout.on('data',data=>{
+      const text=data.toString();
+      stdout+=text;
+      buffer+=text;
+      const lines=buffer.split(/\r?\n/);
+      buffer=lines.pop()||'';
+      for(const line of lines){
+        if(!line.trim())continue;
+        try{
+          const event=JSON.parse(line);
+          if(event.event==='bundle_progress'){
+            const p=65+Math.round(clamp(event.progress,0,100)*0.05);
+            updateJob(job,'rendering',p,'bundling_renderer').catch(()=>{});
+          }
+          if(event.event==='render_progress'){
+            const p=70+Math.round(clamp(event.progress,0,100)*0.24);
+            updateJob(job,'rendering',p,'rendering_frames').catch(()=>{});
+          }
+        }catch{}
+      }
+    });
+    child.stderr.on('data',d=>{stderr+=d.toString()});
+    child.on('error',reject);
+    child.on('close',code=>{
+      if(code===0)return resolve({stdout,stderr});
+      const e=new Error(\`Edit+ renderer exited \${code}: \${stderr.slice(-1800)}\`);
+      e.code='EDIT_RENDER_FAILED';
+      reject(e);
+    });
+  });
+}
+
+async function persistTimeline(project,job,timeline){
+  const existing=await query(
+    'select id from public.edit_timelines where project_id=$1 and version=1 limit 1',
+    [project.id]
+  );
+  if(existing.rows.length){
+    await query(
+      'update public.edit_timelines set timeline_json=$2::jsonb,decision_model=$3 where id=$1',
+      [existing.rows[0].id,JSON.stringify(timeline),timeline.plannerModel]
+    );
+    return existing.rows[0].id;
+  }
+  const r=await query(
+    \`insert into public.edit_timelines(project_id,user_id,version,duration_ms,timeline_json,decision_model)
+     values($1,$2,1,$3,$4::jsonb,$5)
+     returning id\`,
+    [project.id,job.user_id,timeline.outputDurationMs,JSON.stringify(timeline),timeline.plannerModel]
+  );
+  return r.rows[0].id;
+}
+
+async function persistEditExport({job,project,sourceMedia,outputPath,timeline}){
+  const storagePath=\`\${job.user_id}/renders/\${Date.now()}-\${job.id}.mp4\`;
+  const info=await uploadStorageFile(sourceMedia.storage_bucket,storagePath,outputPath,'video/mp4');
+
+  const media=await query(
+    \`insert into public.media_assets(
+      user_id,module,kind,storage_bucket,storage_path,original_name,mime_type,size_bytes,status,metadata
+     ) values($1,'editplus','render',$2,$3,$4,'video/mp4',$5,'ready',$6::jsonb)
+     returning *\`,
+    [
+      job.user_id,sourceMedia.storage_bucket,storagePath,
+      \`editplus-\${project.style}-\${job.id}.mp4\`,info.size,
+      JSON.stringify({source_video_id:sourceMedia.id,edit_project_id:project.id,job_id:job.id,timeline_version:1})
+    ]
+  );
+  const output=media.rows[0];
+
+  const existing=await query('select id from public.edit_exports where job_id=$1 limit 1',[job.id]);
+  let exportId;
+  if(existing.rows.length){
+    exportId=existing.rows[0].id;
+  }else{
+    const exp=await query(
+      \`insert into public.edit_exports(project_id,job_id,user_id,output_video_id,preset,status)
+       values($1,$2,$3,$4,'1080x1920','ready') returning id\`,
+      [project.id,job.id,job.user_id,output.id]
+    );
+    exportId=exp.rows[0].id;
+  }
+
+  await query(
+    \`update public.edit_projects
+     set status='completed',updated_at=now()
+     where id=$1 and user_id=$2\`,
+    [project.id,job.user_id]
+  );
+
+  return {
+    edit_project_id:project.id,
+    export_id:exportId,
+    output_video_id:output.id,
+    output_storage_path:storagePath,
+    output_duration_ms:timeline.outputDurationMs,
+    timeline_version:1
+  };
+}
+
+async function processEditJob(job){
+  const prior=await query(
+    \`select e.id as export_id,e.output_video_id,m.storage_path,p.id as edit_project_id
+     from public.edit_exports e
+     join public.media_assets m on m.id=e.output_video_id
+     join public.edit_projects p on p.id=e.project_id
+     where e.job_id=$1 and e.user_id=$2
+     limit 1\`,
+    [job.id,job.user_id]
+  );
+  if(prior.rows.length){
+    const row=prior.rows[0];
+    await updateJob(job,'completed',100,'idempotent_export_reused',{result:row});
+    return;
+  }
+
+  const project=await ownEditProject(job);
+  const media=await getMedia(job);
+  const dir=await mkdtemp(path.join(os.tmpdir(),'editplus-'));
+  const source=path.join(dir,'source'+extForMime(media.mime_type));
+  const propsFile=path.join(dir,'props.json');
+  const output=path.join(dir,'output.mp4');
+  let geminiFile=null;
+
+  try{
+    await query(
+      \`update public.edit_projects set status='planning',updated_at=now()
+       where id=$1 and user_id=$2\`,
+      [project.id,job.user_id]
+    );
+
+    await updateJob(job,'processing',5,'downloading_source');
+    await downloadMedia(media,source);
+
+    await updateJob(job,'processing',12,'probing_media');
+    const probe=await probeVideo(source);
+    if(!probe.duration_s){const e=new Error('Unreadable source duration');e.code='INVALID_VIDEO';throw e}
+
+    await updateJob(job,'transcribing',20,'measuring_silences');
+    const silence=await detectSilences(source,probe.duration_s);
+    const analysis=await loadSourceAnalysis(job);
+
+    await updateJob(job,'planning',28,'uploading_planner_source');
+    geminiFile=await uploadGeminiFile(source,media.mime_type,media.original_name||'editplus-source');
+
+    await updateJob(job,'planning',36,'waiting_for_planner_video');
+    geminiFile=await waitGeminiFile(geminiFile);
+
+    await updateJob(job,'planning',48,'planning_timeline');
+    const plan=await planEditWithGemini(
+      geminiFile,
+      media.mime_type,
+      project.style||'creator_clean',
+      analysis,
+      {probe,silence}
+    );
+
+    await updateJob(job,'planning',58,'normalizing_timeline');
+    const timeline=buildTimeline({probe,silence,plan,project});
+    if(!timeline.segments.length||timeline.outputDurationMs<500){
+      const e=new Error('Edit planner produced an unusable timeline');e.code='INVALID_EDIT_TIMELINE';throw e;
+    }
+    await persistTimeline(project,job,timeline);
+
+    const sourceUrl=await signStorageObject(media.storage_bucket,media.storage_path,7200);
+    await writeFile(propsFile,JSON.stringify({
+      sourceUrl,
+      style:project.style,
+      captionPreset:project.caption_preset,
+      accentColor:'#d7ff3f',
+      timeline
+    }));
+
+    await query(
+      \`update public.edit_projects set status='rendering',updated_at=now()
+       where id=$1 and user_id=$2\`,
+      [project.id,job.user_id]
+    );
+
+    await updateJob(job,'rendering',65,'starting_renderer');
+    await runEditRenderer(job,propsFile,output);
+
+    await updateJob(job,'encoding',95,'uploading_export');
+    const result=await persistEditExport({job,project,sourceMedia:media,outputPath:output,timeline});
+    await query('update public.processing_jobs set output_video_id=$2 where id=$1',[job.id,result.output_video_id]);
+
+    await updateJob(job,'completed',100,'completed',{result});
+  }catch(error){
+    await query(
+      \`update public.edit_projects set status='failed',updated_at=now()
+       where id=$1 and user_id=$2\`,
+      [project.id,job.user_id]
+    ).catch(()=>{});
+    throw error;
+  }finally{
+    if(geminiFile?.name)await deleteGeminiFile(geminiFile.name);
+    await rm(dir,{recursive:true,force:true}).catch(()=>{});
+  }
+}
+
+async function processJob(job){
+  if(job.kind==='viral_analysis')return processAnalysisJob(job);
+  if(job.kind==='edit_render')return processEditJob(job);
+  const e=new Error(`Unsupported job kind: ${job.kind}`);
+  e.code='UNSUPPORTED_JOB_KIND';
+  throw e;
 }
 
 async function main(){
