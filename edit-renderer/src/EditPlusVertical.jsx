@@ -93,25 +93,45 @@ const CaptionLayer=({captions,preset,accentColor})=>{
 };
 
 const OverlayLayer=({overlays})=>{
-  const frame=useCurrentFrame();
   const {fps}=useVideoConfig();
-  const now=frame/fps*1000;
-  return (overlays||[]).filter(o=>now>=Number(o.startMs||0)&&now<Number(o.endMs||0)&&o.assetUrl).map((overlay,i)=>{
-    const common={
-      position:'absolute',
-      left:overlay.x??0,
-      top:overlay.y??0,
-      width:overlay.width??'100%',
-      height:overlay.height??'100%',
-      objectFit:overlay.fit||'cover',
-      borderRadius:overlay.radius||0
-    };
-    if(overlay.type==='video'){
-      const localFrame=Math.max(0,frame-Math.round(Number(overlay.startMs||0)/1000*fps));
-      return <Video key={i} src={overlay.assetUrl} muted={overlay.muted!==false} trimBefore={Math.max(0,localFrame)} style={common}/>;
-    }
-    return <Img key={i} src={overlay.assetUrl} style={common}/>;
-  });
+
+  return (overlays||[])
+    .filter(overlay=>overlay?.assetUrl)
+    .map((overlay,i)=>{
+      const startMs=Math.max(0,Number(overlay.startMs||0));
+      const endMs=Math.max(startMs,Number(overlay.endMs||startMs));
+      const from=Math.max(0,Math.round(startMs/1000*fps));
+      const durationInFrames=Math.max(1,Math.round((endMs-startMs)/1000*fps));
+      const common={
+        position:'absolute',
+        left:overlay.x??0,
+        top:overlay.y??0,
+        width:overlay.width??'100%',
+        height:overlay.height??'100%',
+        objectFit:overlay.fit||'cover',
+        borderRadius:overlay.radius||0
+      };
+
+      return (
+        <Sequence
+          key={i}
+          from={from}
+          durationInFrames={durationInFrames}
+          name={overlay.name||`Overlay ${i+1}`}
+        >
+          {overlay.type==='video' ? (
+            <Video
+              src={overlay.assetUrl}
+              muted={overlay.muted!==false}
+              trimBefore={Math.max(0,Math.round(Number(overlay.sourceStartMs||0)/1000*fps))}
+              style={common}
+            />
+          ) : (
+            <Img src={overlay.assetUrl} style={common}/>
+          )}
+        </Sequence>
+      );
+    });
 };
 
 export const EditPlusVertical=({
