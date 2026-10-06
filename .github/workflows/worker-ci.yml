@@ -1,0 +1,25 @@
+name: Durable worker CI
+
+on:
+  push:
+    branches: [durable-jobs]
+    paths:
+      - 'railway-worker/**'
+      - '.github/workflows/worker-ci.yml'
+  pull_request:
+    paths:
+      - 'railway-worker/**'
+      - '.github/workflows/worker-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: JavaScript syntax
+        run: node --check railway-worker/src/index.js
+      - name: Build production container
+        run: docker build -t viral-edit-worker:ci railway-worker
