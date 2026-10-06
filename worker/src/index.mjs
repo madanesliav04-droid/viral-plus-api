@@ -1,6 +1,6 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
-import {claimJob, refundJobCredit, updateJob, addJobEvent} from './supabase.mjs';
+import {claimJob, refundJobCredit, updateJob, addJobEvent, isSupabaseConfigured} from './supabase.mjs';
 import {processViralAnalysis} from './viral-analysis.mjs';
 
 const workerId = process.env.WORKER_ID || `railway-${crypto.randomUUID().slice(0, 8)}`;
@@ -67,8 +67,25 @@ async function processJob(job) {
   }
 }
 
+function runtimeConfig() {
+  return {
+    supabase_url:Boolean(process.env.SUPABASE_URL),
+    supabase_service_role:Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    gemini:Boolean(process.env.GEMINI_API_KEY)
+  };
+}
+
+function isReady() {
+  const cfg=runtimeConfig();
+  return isSupabaseConfigured() && cfg.gemini;
+}
+
 async function loop() {
   while (!shuttingDown) {
+    if (!isReady()) {
+      await sleep(Math.max(pollMs, 5000));
+      continue;
+    }
     try {
       const job = await claimJob(workerId);
       if (!job) {
@@ -89,6 +106,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, {'content-type':'application/json'});
     res.end(JSON.stringify({
       ok:true,
+      ready:isReady(),
+      configured:runtimeConfig(),
       service:'viral-edit-worker',
       worker_id:workerId,
       active_job_id:activeJobId,
