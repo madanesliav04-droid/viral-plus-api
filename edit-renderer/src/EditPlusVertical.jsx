@@ -36,7 +36,7 @@ const Segment=({segment,sourceUrl,fps})=>{
         <Video
           src={sourceUrl}
           trimBefore={Math.round(segment.sourceStartMs/1000*fps)}
-          trimAfter={Math.max(Math.round(segment.sourceEndMs/1000*fps),Math.round(segment.sourceStartMs/1000*fps)+1)}
+          durationInFrames={segment.durationFrames}
           volume={segment.muted?0:1}
           style={{
             width:'100%',
