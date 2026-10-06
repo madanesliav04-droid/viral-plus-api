@@ -422,7 +422,7 @@ async function googleError(response,prefix){
 }
 
 function parseJson(text){
-  let value=String(text||'').trim().replace(/^\`\`\`(?:json)?\s*/i,'').replace(/\s*\`\`\`$/i,'');
+  let value=String(text||'').trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/i,'');
   const a=value.indexOf('{'),b=value.lastIndexOf('}');
   if(a>=0&&b>a)value=value.slice(a,b+1);
   return JSON.parse(value);
@@ -824,10 +824,10 @@ function captionsForTimeline(transcript,kept){
 }
 
 function buildEditPrompt({style,analysis,metrics}){
-  return \`You are the edit-planning layer of Edit+. You decide editorial changes for a short-form vertical talking-head video.
+  return `You are the edit-planning layer of Edit+. You decide editorial changes for a short-form vertical talking-head video.
 You DO NOT render video. Return structured edit decisions only.
 
-STYLE: \${style}
+STYLE: ${style}
 
 STYLE RULES
 - creator_clean: premium clean facecam, remove dead air, moderate narrative punch-ins, captions, minimal effects.
@@ -836,10 +836,10 @@ STYLE RULES
 - podcast_authority: sober premium rhythm, restrained reframing, captions, occasional contextual B-roll.
 
 DETERMINISTIC MEASUREMENTS
-\${JSON.stringify(metrics,null,2)}
+${JSON.stringify(metrics,null,2)}
 
 VIRAL+ SOURCE ANALYSIS
-\${JSON.stringify(analysis||{},null,2)}
+${JSON.stringify(analysis||{},null,2)}
 
 ABSOLUTE RULES
 - Use actual timestamps from the uploaded video.
@@ -860,7 +860,7 @@ OUTPUT
   "hook_visual":{"start_s":0.0,"end_s":2.0,"instruction":"..."},
   "notes":["..."]
 }
-\`;
+`;
 }
 
 async function planEditWithGemini(file,mimeType,style,analysis,metrics){
@@ -953,11 +953,11 @@ function buildTimeline({probe,silence,plan,project}){
 async function uploadStorageFile(bucket,objectPath,file,contentType){
   const encoded=objectPath.split('/').map(encodeURIComponent).join('/');
   const info=await stat(file);
-  const r=await fetch(\`\${SUPABASE_URL}/storage/v1/object/\${encodeURIComponent(bucket)}/\${encoded}\`,{
+  const r=await fetch(`${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(bucket)}/${encoded}`,{
     method:'POST',
     headers:{
       apikey:SERVICE_KEY,
-      Authorization:\`Bearer \${SERVICE_KEY}\`,
+      Authorization:`Bearer ${SERVICE_KEY}`,
       'Content-Type':contentType,
       'Content-Length':String(info.size),
       'x-upsert':'true'
@@ -967,7 +967,7 @@ async function uploadStorageFile(bucket,objectPath,file,contentType){
   });
   if(!r.ok){
     const text=await r.text().catch(()=>'');
-    const e=new Error(\`Storage upload failed (\${r.status}): \${text.slice(0,500)}\`);
+    const e=new Error(`Storage upload failed (${r.status}): ${text.slice(0,500)}`);
     e.code='STORAGE_UPLOAD_FAILED';
     throw e;
   }
@@ -1007,7 +1007,7 @@ async function runEditRenderer(job,inputPropsFile,outputFile){
     child.on('error',reject);
     child.on('close',code=>{
       if(code===0)return resolve({stdout,stderr});
-      const e=new Error(\`Edit+ renderer exited \${code}: \${stderr.slice(-1800)}\`);
+      const e=new Error(`Edit+ renderer exited ${code}: ${stderr.slice(-1800)}`);
       e.code='EDIT_RENDER_FAILED';
       reject(e);
     });
@@ -1027,26 +1027,26 @@ async function persistTimeline(project,job,timeline){
     return existing.rows[0].id;
   }
   const r=await query(
-    \`insert into public.edit_timelines(project_id,user_id,version,duration_ms,timeline_json,decision_model)
+    `insert into public.edit_timelines(project_id,user_id,version,duration_ms,timeline_json,decision_model)
      values($1,$2,1,$3,$4::jsonb,$5)
-     returning id\`,
+     returning id`,
     [project.id,job.user_id,timeline.outputDurationMs,JSON.stringify(timeline),timeline.plannerModel]
   );
   return r.rows[0].id;
 }
 
 async function persistEditExport({job,project,sourceMedia,outputPath,timeline}){
-  const storagePath=\`\${job.user_id}/renders/\${Date.now()}-\${job.id}.mp4\`;
+  const storagePath=`${job.user_id}/renders/${Date.now()}-${job.id}.mp4`;
   const info=await uploadStorageFile(sourceMedia.storage_bucket,storagePath,outputPath,'video/mp4');
 
   const media=await query(
-    \`insert into public.media_assets(
+    `insert into public.media_assets(
       user_id,module,kind,storage_bucket,storage_path,original_name,mime_type,size_bytes,status,metadata
      ) values($1,'editplus','render',$2,$3,$4,'video/mp4',$5,'ready',$6::jsonb)
-     returning *\`,
+     returning *`,
     [
       job.user_id,sourceMedia.storage_bucket,storagePath,
-      \`editplus-\${project.style}-\${job.id}.mp4\`,info.size,
+      `editplus-${project.style}-${job.id}.mp4`,info.size,
       JSON.stringify({source_video_id:sourceMedia.id,edit_project_id:project.id,job_id:job.id,timeline_version:1})
     ]
   );
@@ -1058,17 +1058,17 @@ async function persistEditExport({job,project,sourceMedia,outputPath,timeline}){
     exportId=existing.rows[0].id;
   }else{
     const exp=await query(
-      \`insert into public.edit_exports(project_id,job_id,user_id,output_video_id,preset,status)
-       values($1,$2,$3,$4,'1080x1920','ready') returning id\`,
+      `insert into public.edit_exports(project_id,job_id,user_id,output_video_id,preset,status)
+       values($1,$2,$3,$4,'1080x1920','ready') returning id`,
       [project.id,job.id,job.user_id,output.id]
     );
     exportId=exp.rows[0].id;
   }
 
   await query(
-    \`update public.edit_projects
+    `update public.edit_projects
      set status='completed',updated_at=now()
-     where id=$1 and user_id=$2\`,
+     where id=$1 and user_id=$2`,
     [project.id,job.user_id]
   );
 
@@ -1084,12 +1084,12 @@ async function persistEditExport({job,project,sourceMedia,outputPath,timeline}){
 
 async function processEditJob(job){
   const prior=await query(
-    \`select e.id as export_id,e.output_video_id,m.storage_path,p.id as edit_project_id
+    `select e.id as export_id,e.output_video_id,m.storage_path,p.id as edit_project_id
      from public.edit_exports e
      join public.media_assets m on m.id=e.output_video_id
      join public.edit_projects p on p.id=e.project_id
      where e.job_id=$1 and e.user_id=$2
-     limit 1\`,
+     limit 1`,
     [job.id,job.user_id]
   );
   if(prior.rows.length){
@@ -1108,8 +1108,8 @@ async function processEditJob(job){
 
   try{
     await query(
-      \`update public.edit_projects set status='planning',updated_at=now()
-       where id=$1 and user_id=$2\`,
+      `update public.edit_projects set status='planning',updated_at=now()
+       where id=$1 and user_id=$2`,
       [project.id,job.user_id]
     );
 
@@ -1156,8 +1156,8 @@ async function processEditJob(job){
     }));
 
     await query(
-      \`update public.edit_projects set status='rendering',updated_at=now()
-       where id=$1 and user_id=$2\`,
+      `update public.edit_projects set status='rendering',updated_at=now()
+       where id=$1 and user_id=$2`,
       [project.id,job.user_id]
     );
 
@@ -1171,8 +1171,8 @@ async function processEditJob(job){
     await updateJob(job,'completed',100,'completed',{result});
   }catch(error){
     await query(
-      \`update public.edit_projects set status='failed',updated_at=now()
-       where id=$1 and user_id=$2\`,
+      `update public.edit_projects set status='failed',updated_at=now()
+       where id=$1 and user_id=$2`,
       [project.id,job.user_id]
     ).catch(()=>{});
     throw error;
