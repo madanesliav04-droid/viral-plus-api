@@ -22,7 +22,7 @@ jobs:
       - name: JavaScript syntax
         run: node --check railway-worker/src/index.js
       - name: Build production container
-        run: docker build -t viral-edit-worker:ci railway-worker
+        run: docker build -f railway-worker/Dockerfile -t viral-edit-worker:ci .
       - name: Install Edit+ renderer
         working-directory: edit-renderer
         run: npm install
