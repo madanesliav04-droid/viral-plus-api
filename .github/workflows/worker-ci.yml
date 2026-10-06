@@ -23,3 +23,9 @@ jobs:
         run: node --check railway-worker/src/index.js
       - name: Build production container
         run: docker build -t viral-edit-worker:ci railway-worker
+      - name: Install Edit+ renderer
+        working-directory: edit-renderer
+        run: npm install
+      - name: Bundle Edit+ Remotion composition
+        working-directory: edit-renderer
+        run: npm run bundle
