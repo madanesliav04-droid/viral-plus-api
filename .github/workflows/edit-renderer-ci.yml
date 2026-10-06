@@ -1,0 +1,28 @@
+name: Edit+ renderer CI
+
+on:
+  push:
+    branches: [durable-jobs]
+    paths:
+      - 'edit-renderer/**'
+      - '.github/workflows/edit-renderer-ci.yml'
+  pull_request:
+    paths:
+      - 'edit-renderer/**'
+      - '.github/workflows/edit-renderer-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: edit-renderer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: npm install
+      - name: Bundle Remotion project
+        run: npm run bundle
