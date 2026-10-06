@@ -1,16 +1,20 @@
-const required = name => {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing env ${name}`);
-  return value.replace?.(/\/$/, '') || value;
-};
+function getConfig() {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const serviceKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  if (!url) throw new Error('Missing env SUPABASE_URL');
+  if (!serviceKey) throw new Error('Missing env SUPABASE_SERVICE_ROLE_KEY');
+  return {url, serviceKey};
+}
 
-export const SUPABASE_URL = required('SUPABASE_URL');
-const SERVICE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
+export function isSupabaseConfigured() {
+  return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+}
 
 function headers(extra = {}) {
+  const {serviceKey} = getConfig();
   return {
-    apikey: SERVICE_KEY,
-    Authorization: `Bearer ${SERVICE_KEY}`,
+    apikey: serviceKey,
+    Authorization: `Bearer ${serviceKey}`,
     ...extra
   };
 }
@@ -28,7 +32,8 @@ async function parse(res) {
 }
 
 export async function rpc(name, body = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${encodeURIComponent(name)}`, {
+  const {url} = getConfig();
+  const res = await fetch(`${url}/rest/v1/rpc/${encodeURIComponent(name)}`, {
     method: 'POST',
     headers: headers({'Content-Type':'application/json'}),
     body: JSON.stringify(body)
@@ -37,13 +42,15 @@ export async function rpc(name, body = {}) {
 }
 
 export async function selectOne(table, query) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {headers: headers({Accept:'application/json'})});
+  const {url} = getConfig();
+  const res = await fetch(`${url}/rest/v1/${table}?${query}`, {headers: headers({Accept:'application/json'})});
   const rows = await parse(res);
   return Array.isArray(rows) ? rows[0] || null : null;
 }
 
 export async function insertOne(table, row) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+  const {url} = getConfig();
+  const res = await fetch(`${url}/rest/v1/${table}`, {
     method: 'POST',
     headers: headers({'Content-Type':'application/json', Prefer:'return=representation'}),
     body: JSON.stringify(row)
@@ -53,7 +60,8 @@ export async function insertOne(table, row) {
 }
 
 export async function patch(table, query, row) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
+  const {url} = getConfig();
+  const res = await fetch(`${url}/rest/v1/${table}?${query}`, {
     method: 'PATCH',
     headers: headers({'Content-Type':'application/json', Prefer:'return=representation'}),
     body: JSON.stringify(row)
@@ -92,9 +100,10 @@ export async function heartbeat(job, status, progress, stage, message) {
 }
 
 export async function storageDownload(asset) {
+  const {url} = getConfig();
   const bucket = encodeURIComponent(asset.storage_bucket);
   const objectPath = asset.storage_path.split('/').map(encodeURIComponent).join('/');
-  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${objectPath}`, {
+  const res = await fetch(`${url}/storage/v1/object/${bucket}/${objectPath}`, {
     headers: headers()
   });
   if (!res.ok || !res.body) throw new Error(`Storage download failed (${res.status})`);
