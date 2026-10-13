@@ -1,0 +1,18 @@
+{
+  "name": "omniworld-telegram-whop-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Synchronisation de messages Telegram vers un forum Whop",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "telegram": "^2.26.22",
+    "qrcode": "^1.5.4"
+  }
+}
