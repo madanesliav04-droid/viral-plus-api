@@ -141,7 +141,7 @@ function sessionValid(req){
   const token=String(req.headers.cookie||"").split(";").map(s=>s.trim()).find(s=>s.startsWith("omni_auth="))?.slice(10);
   if(!token)return false;
   const [ts,sig]=token.split(".");
-  if(!/^\\d{10}$/.test(ts||"") || !/^[a-f0-9]{64}$/.test(sig||""))return false;
+  if(!/^[0-9]{10}$/.test(ts||"") || !/^[a-f0-9]{64}$/.test(sig||""))return false;
   const age=Math.floor(Date.now()/1000)-Number(ts);
   if(age<0 || age>24*60*60)return false;
   const expected=Buffer.from(signCookie(ts)),received=Buffer.from(sig);
