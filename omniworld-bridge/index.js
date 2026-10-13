@@ -102,27 +102,32 @@ async function restore(){
 async function startLogin() {
   if(loginBusy || status.startsWith("connected")) return;
   if(!configured)throw new Error("Variables Telegram / Whop manquantes dans Railway.");
-  loginBusy=true;qrImage="";sessionValue="";status="generating_qr";error="";
+  loginBusy=true;qrImage="";sessionValue="";status="connecting_to_telegram";error="";
+  console.info("[telegram-auth] QR request received");
   (async()=>{
     const c=new TelegramClient(new StringSession(""),API_ID,API_HASH,{connectionRetries:5});
     try{
       await c.connect();
+      status="requesting_qr_token";
+      console.info("[telegram-auth] Connected to Telegram; requesting QR token");
       await c.signInUserWithQrCode({apiId:API_ID,apiHash:API_HASH},{
         qrCode:async obj=>{
           qrImage=await QRCode.toDataURL("tg://login?token="+obj.token.toString("base64url"),{margin:2,width:270});
           status="waiting_for_scan";
+          console.info("[telegram-auth] QR image generated");
         },
         password:async()=>{
           status="two_factor_required";
           return new Promise(resolve=>{twoFactorResolve=resolve;});
         },
-        onError:async e=>{error=briefError(e);return true;}
+        onError:async e=>{error=briefError(e);console.error("[telegram-auth] Auth callback error:",error);return true;}
       });
       sessionValue=String(c.session.save());
       status="authorized_copy_session";
+      console.info("[telegram-auth] Telegram login authorized");
       // Ne pas publier maintenant ; la session doit être enregistrée dans Railway.
       try{await c.disconnect();}catch{}
-    }catch(e){status="login_error";error=briefError(e);try{await c.disconnect();}catch{}}
+    }catch(e){status="login_error";error=briefError(e);console.error("[telegram-auth] QR login failed:",error);try{await c.disconnect();}catch{}}
     finally{loginBusy=false;qrImage="";}
   })();
 }
@@ -183,7 +188,7 @@ const html=[
 "<button id='start'>Afficher le QR Telegram</button><p id='state'>État…</p><div id='qr'></div>",
 "<div id='two' style='display:none'><p>Mot de passe Telegram en deux étapes :</p><input type='password' id='pwd'><button id='submit'>Valider</button></div>",
 "<div id='saved' style='display:none'><p><strong>Session autorisée.</strong> Copie cette valeur dans Railway, variable <code>TELEGRAM_SESSION</code>. Ne la partage jamais en message.</p><textarea id='session' readonly></textarea><button id='copy'>Copier la session</button></div>",
-"<p>Après enregistrement dans Railway, je pourrai tester la synchronisation. Aucune publication automatique avant activation.</p></section>",
+"<p>Le QR peut mettre 10 à 30 secondes à apparaître. Si une erreur apparaît, envoie seulement son texte.</p><p>Après enregistrement dans Railway, je pourrai tester la synchronisation. Aucune publication automatique avant activation.</p></section>",
 "<script>const el=id=>document.getElementById(id);",
 "async function refresh(){try{const d=await(await fetch('/api/status',{cache:'no-store'})).json();",
 "el('state').textContent=d.status+(d.error?' — '+d.error:'')+(d.enabled?' — Synchronisation active':' — Synchronisation en attente');",
