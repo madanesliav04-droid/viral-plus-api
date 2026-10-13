@@ -129,11 +129,51 @@ async function startLogin() {
 const app=express();
 app.disable("x-powered-by");
 app.use(express.json({limit:"5kb"}));
+app.use(express.urlencoded({extended:false,limit:"2kb"}));
 app.get("/health",(_,res)=>res.json({ok:true,configured,telegramConnected:status.startsWith("connected"),groupFound:Boolean(group),syncEnabled:ENABLED}));
+const signCookie=ts=>crypto.createHmac("sha256",ADMIN_PASSWORD).update("omniworld:"+ts).digest("hex");
+const passwordIsValid=s=>{
+  if(!ADMIN_PASSWORD || ADMIN_PASSWORD.length<20 || typeof s!=="string")return false;
+  const a=Buffer.from(s),b=Buffer.from(ADMIN_PASSWORD);
+  return a.length===b.length && crypto.timingSafeEqual(a,b);
+};
+function sessionValid(req){
+  const token=String(req.headers.cookie||"").split(";").map(s=>s.trim()).find(s=>s.startsWith("omni_auth="))?.slice(10);
+  if(!token)return false;
+  const [ts,sig]=token.split(".");
+  if(!/^\\d{10}$/.test(ts||"") || !/^[a-f0-9]{64}$/.test(sig||""))return false;
+  const age=Math.floor(Date.now()/1000)-Number(ts);
+  if(age<0 || age>24*60*60)return false;
+  const expected=Buffer.from(signCookie(ts)),received=Buffer.from(sig);
+  return received.length===expected.length && crypto.timingSafeEqual(expected,received);
+}
+const loginPage=errorMessage=>[
+"<!doctype html><html lang='fr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
+"<title>Connexion — OMNIWORLD Sync</title><style>body{font:16px system-ui;background:#111822;color:#fff;max-width:430px;margin:50px auto;padding:20px}main{border:1px solid #405169;padding:24px;border-radius:14px}label{display:block;margin-top:20px}input{box-sizing:border-box;width:100%;padding:12px;font-size:16px;border-radius:8px;border:1px solid #9facbc}button{display:block;margin-top:22px;width:100%;padding:14px;border:0;border-radius:8px;background:#dae9ff;font-weight:700;cursor:pointer}.error{color:#ffb0b0}</style>",
+"<main><h2>OMNIWORLD Sync</h2><p>Connecte-toi avec le mot de passe enregistré dans les variables Railway.</p>",
+errorMessage?"<p class='error'>Identifiant ou mot de passe incorrect. Vérifie BRIDGE_ADMIN_PASSWORD dans Railway.</p>":"",
+"<form method='POST' action='/auth/login'><label>Identifiant</label><input name='username' value='admin' required autocomplete='username'><label>Mot de passe</label><input type='password' name='password' required autocomplete='current-password'><button type='submit'>Se connecter</button></form>",
+"</main></html>"
+].join("");
+let failedLogins=0,blockUntil=0;
+app.get("/auth/login",(req,res)=>sessionValid(req)?res.redirect("/setup"):res.type("html").send(loginPage(false)));
+app.post("/auth/login",(req,res)=>{
+  res.set("Cache-Control","no-store");
+  if(Date.now()<blockUntil)return res.status(429).type("html").send(loginPage(true));
+  if(req.body?.username!=="admin" || !passwordIsValid(req.body?.password)){
+    if(++failedLogins>=12){blockUntil=Date.now()+5*60*1000;failedLogins=0;}
+    return res.status(200).type("html").send(loginPage(true));
+  }
+  failedLogins=0;
+  const ts=String(Math.floor(Date.now()/1000));
+  res.cookie("omni_auth",ts+"."+signCookie(ts),{httpOnly:true,secure:true,sameSite:"strict",maxAge:86400000,path:"/"});
+  res.redirect(303,"/setup");
+});
 app.use((req,res,next)=>{
-  if(!canAdmin(req)){res.set("WWW-Authenticate",'Basic realm="OMNIWORLD Sync"');return res.status(401).send("Accès privé");}
+  if(!sessionValid(req))return req.method==="GET"?res.redirect("/auth/login"):res.status(403).json({error:"Connexion expirée. Recharge la page."});
   if(req.method!=="GET" && req.headers.origin && new URL(req.headers.origin).host!==req.headers.host)return res.status(403).send("Origine non autorisée");
   res.set("Cache-Control","no-store");
+  res.set("X-Frame-Options","DENY");
   next();
 });
 const html=[
