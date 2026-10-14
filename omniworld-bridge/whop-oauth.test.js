@@ -35,6 +35,8 @@ test("PKCE, owner identity and encrypted restart persistence",async t=>{
   const {flow,params}=await authorize(f.oauth);
   assert.equal(params.has("company_id"),false);
   assert.equal(params.get("scope"),"openid profile forum:read forum:post:create");
+  assert.match(params.get("nonce"),/^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(params.get("nonce"),params.get("state"));
   const body=f.calls[0].body;
   assert.equal(body.company_id,undefined);
   assert.equal(body.client_secret,"test-client-secret");
@@ -47,6 +49,8 @@ test("PKCE, owner identity and encrypted restart persistence",async t=>{
   assert.equal(await restored.accessToken(),"test-access-1");
   await assert.rejects(f.oauth.callback({state:params.get("state"),code:"test-code",browser:flow.browser}),/expirée/);
   assert.equal(JSON.stringify(f.oauth.status()).includes("test-access"),false);
+  const next=await f.oauth.start();
+  assert.notEqual(new URL(next.url).searchParams.get("nonce"),params.get("nonce"));
 });
 test("callback rejects mismatched cookie, expired flow and wrong Whop owner",async t=>{
   const f=await fixture(t,"user_wrong");
