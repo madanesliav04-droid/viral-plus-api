@@ -6,6 +6,7 @@ const { NewMessage } = require("telegram/events");
 const QRCode = require("qrcode");
 const crypto = require("node:crypto");
 const ENV = process.env;
+const whopOAuth = require("./whop-oauth").createWhopOAuth({env:ENV});
 const API_ID = Number(ENV.TELEGRAM_API_ID || 0);
 const API_HASH = ENV.TELEGRAM_API_HASH || "";
 const TG_CHAT = ENV.TELEGRAM_CHAT_ID || "";
@@ -34,7 +35,8 @@ function canAdmin(req) {
 function tgSource(id) {
   return "https://t.me/c/" + TG_CHAT.replace(/^-100/,"") + "/" + id;
 }
-async function whopRequest(path, method, payload, credential = WHOP_KEY) {
+async function whopRequest(path, method, payload, credential) {
+  credential = credential || await whopOAuth.accessToken();
   const r = await fetch("https://api.whop.com/api/v1/" + path, {
     method, headers: {"Authorization":"Bearer " + credential,"Content-Type":"application/json"},
     body:payload ? JSON.stringify(payload) : undefined, signal:AbortSignal.timeout(15000)
@@ -42,24 +44,10 @@ async function whopRequest(path, method, payload, credential = WHOP_KEY) {
   if (!r.ok) throw new Error("API Whop [" + method + " " + path.split("?")[0] + "] " + r.status + " : " + (await r.text()).slice(0,150));
   return r.json();
 }
-// Confirmed publishing account: urfavceo75. This identifier is not a secret.
-const WHOP_PUBLISHER_USER_ID = ENV.WHOP_PUBLISHER_USER_ID || "user_Lcgrt81hIa1TM";
 async function postToWhop(text,title) {
-  // Keep the short-lived credential only in memory; never log or persist it.
-  const access = await whopRequest("access_tokens","POST",{
-    user_id:WHOP_PUBLISHER_USER_ID,
-    scoped_actions:["forum:read","forum:post:create"],
-    expires_at:new Date(Date.now()+60*60*1000).toISOString()
-  });
-  if(typeof access.token!=="string" || !access.token ||
-     !Number.isFinite(Date.parse(access.expires_at)) ||
-     Date.parse(access.expires_at)<=Date.now()){
-    throw new Error("Whop : jeton utilisateur absent ou expiré.");
-  }
   return whopRequest("forum_posts","POST",{
-    experience_id:WHOP_FORUM, content:text,
-    title:title.slice(0,100)
-  },access.token);
+    experience_id:WHOP_FORUM, content:text, title:title.slice(0,100)
+  });
 }
 async function whopLastId() {
   const r=await whopRequest("forum_posts?experience_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
@@ -187,6 +175,22 @@ app.post("/auth/login",(req,res)=>{
   res.cookie("omni_auth",ts+"."+signCookie(ts),{httpOnly:true,secure:true,sameSite:"strict",maxAge:86400000,path:"/"});
   res.redirect(303,"/setup");
 });
+// OAuth callback is cross-site: validate its own one-use state and Lax cookie.
+app.get("/oauth/whop/callback",async(req,res)=>{
+  res.set("Cache-Control","no-store");
+  res.set("Referrer-Policy","no-referrer");
+  res.set("X-Frame-Options","DENY");
+  const browser=String(req.headers.cookie||"").split(";").map(s=>s.trim()).find(s=>s.startsWith("omni_whop_flow="))?.slice(15);
+  res.clearCookie("omni_whop_flow",{httpOnly:true,secure:true,sameSite:"lax",path:"/oauth/whop/callback"});
+  try{
+    await whopOAuth.callback({state:req.query.state,code:req.query.code,browser,denied:Boolean(req.query.error)});
+    res.type("html").send("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><h2>Compte Whop connecté</h2><p>La synchronisation reste en attente. Tu peux maintenant lancer le test.</p><a href='/setup'>Revenir au connecteur</a>");
+  }catch(e){
+    // These messages are generated locally and never include provider responses.
+    const message=String(e.message).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+    res.status(400).type("html").send("<!doctype html><meta charset='utf-8'><p>"+message+"</p><a href='/setup'>Revenir au connecteur</a>");
+  }
+});
 app.use((req,res,next)=>{
   if(!sessionValid(req))return req.method==="GET"?res.redirect("/auth/login"):res.status(403).json({error:"Connexion expirée. Recharge la page."});
   if(req.method!=="GET" && req.headers.origin && new URL(req.headers.origin).host!==req.headers.host)return res.status(403).send("Origine non autorisée");
@@ -202,9 +206,11 @@ const html=[
 "<div id='two' style='display:none'><p>Mot de passe Telegram en deux étapes :</p><input type='password' id='pwd'><button id='submit'>Valider</button></div>",
 "<div id='saved' style='display:none'><p><strong>Session autorisée.</strong> Copie cette valeur dans Railway, variable <code>TELEGRAM_SESSION</code>. Ne la partage jamais en message.</p><textarea id='session' readonly></textarea><button id='copy'>Copier la session</button></div>",
 "<p>Le QR peut mettre 10 à 30 secondes à apparaître. Si une erreur apparaît, envoie seulement son texte.</p><p>Après enregistrement dans Railway, je pourrai tester la synchronisation. Aucune publication automatique avant activation.</p></section>",
+"<section><h3>Connexion Whop</h3><p>Autorise le compte propriétaire urfavceo75 pour publier dans OMNIWORLD.</p><button id='connectWhop'>Connecter Whop</button><p id='whopState' role='status'></p></section>",
 "<section><h3>Test Whop</h3><p>Ce bouton publie un message technique dans le forum OMNIWORLD, puis vérifie sa lecture. Il ne lance pas la synchronisation Telegram.</p><button id='testWhop'>Tester Whop</button><p id='testResult' role='status'></p></section>",
 "<script>const el=id=>document.getElementById(id);",
 "async function refresh(){try{const d=await(await fetch('/api/status',{cache:'no-store'})).json();",
+"el('whopState').textContent=d.whop.error||(d.whop.connected?'Compte Whop connecté':d.whop.configured?'Connexion Whop requise':'Configuration OAuth en attente');",
 "el('state').textContent=d.status+(d.error?' — '+d.error:'')+(d.enabled?' — Synchronisation active':' — Synchronisation en attente');",
 "el('qr').innerHTML=d.qr?'<img alt=\"QR Telegram\" src=\"'+d.qr+'\">':'';",
 "el('two').style.display=d.twoFactor?'block':'none';",
@@ -213,12 +219,20 @@ const html=[
 "el('start').onclick=async()=>{const r=await fetch('/api/login',{method:'POST'});if(!r.ok)alert((await r.json()).error);refresh();};",
 "el('submit').onclick=async()=>{const v=el('pwd').value;el('pwd').value='';await fetch('/api/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:v})});refresh();};",
 "el('copy').onclick=()=>{navigator.clipboard.writeText(el('session').value);el('copy').textContent='Copié';};",
+"el('connectWhop').onclick=async()=>{el('connectWhop').disabled=true;try{const r=await fetch('/api/whop/connect',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error);location.assign(d.url);}catch(e){el('whopState').textContent=e.message;el('connectWhop').disabled=false;}};",
 "el('testWhop').onclick=async()=>{el('testWhop').disabled=true;el('testResult').textContent='Test en cours…';try{const r=await fetch('/api/test',{method:'POST'});const d=await r.json();el('testResult').textContent=r.ok?'Test réussi : publication retrouvée dans Whop.':d.error||'Test échoué';}catch(e){el('testResult').textContent='Connexion interrompue. Vérifie le forum avant de réessayer.';}finally{el('testWhop').disabled=false;}};",
 "refresh();setInterval(refresh,3000);</script></body></html>"
 ].join("");
 app.get("/",(_,res)=>res.redirect("/setup"));
 app.get("/setup",(_,res)=>res.type("html").send(html));
-app.get("/api/status",(_,res)=>res.json({status,error,qr:qrImage,twoFactor:Boolean(twoFactorResolve),session:sessionValue,enabled:ENABLED,groupFound:Boolean(group),processed}));
+app.get("/api/status",(_,res)=>res.json({status,error,qr:qrImage,twoFactor:Boolean(twoFactorResolve),session:sessionValue,enabled:ENABLED,groupFound:Boolean(group),processed,whop:whopOAuth.status()}));
+app.post("/api/whop/connect",async(_,res)=>{
+  try{
+    const flow=await whopOAuth.start();
+    res.cookie("omni_whop_flow",flow.browser,{httpOnly:true,secure:true,sameSite:"lax",maxAge:600000,path:"/oauth/whop/callback"});
+    res.json({url:flow.url});
+  }catch(e){res.status(400).json({error:briefError(e)});}
+});
 app.post("/api/login",async(_,res)=>{try{await startLogin();res.json({ok:true});}catch(e){res.status(400).json({error:briefError(e)});}});
 app.post("/api/password",(req,res)=>{
   if(!twoFactorResolve || typeof req.body.password!=="string")return res.status(400).json({error:"Aucun mot de passe demandé."});
@@ -248,3 +262,4 @@ app.post("/api/test",async(_,res)=>{
 });
 app.listen(Number(ENV.PORT||3000),"0.0.0.0",()=>console.log("OMNIWORLD bridge listening; sync enabled:",ENABLED));
 restore();
+
