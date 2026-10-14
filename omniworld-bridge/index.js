@@ -47,7 +47,6 @@ const WHOP_PUBLISHER_USER_ID = ENV.WHOP_PUBLISHER_USER_ID || "user_Lcgrt81hIa1TM
 async function postToWhop(text,title) {
   // Keep the short-lived credential only in memory; never log or persist it.
   const access = await whopRequest("access_tokens","POST",{
-    account_id:WHOP_ACCOUNT,
     user_id:WHOP_PUBLISHER_USER_ID,
     scoped_actions:["forum:read","forum:post:create"],
     expires_at:new Date(Date.now()+60*60*1000).toISOString()
