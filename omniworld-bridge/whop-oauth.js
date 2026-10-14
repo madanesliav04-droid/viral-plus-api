@@ -79,11 +79,14 @@ function createWhopOAuth({env = process.env, request = fetch, clock = Date.now})
     // One operator and one publisher: a fresh flow replaces any abandoned flow.
     pending.clear();
     const state = crypto.randomBytes(32).toString("base64url");
+    // Required by Whop for openid. Identity is verified via authenticated
+    // userinfo; this application never consumes the returned ID token.
+    const nonce = crypto.randomBytes(32).toString("base64url");
     const browser = crypto.randomBytes(32).toString("base64url");
     const verifier = crypto.randomBytes(32).toString("base64url");
     pending.set(state, {browser, verifier, until:clock()+10*60*1000});
     const query = new URLSearchParams({response_type:"code", client_id:clientId, redirect_uri:redirect,
-      scope:"openid profile forum:read forum:post:create", state,
+      scope:"openid profile forum:read forum:post:create", state, nonce,
       code_challenge:crypto.createHash("sha256").update(verifier).digest("base64url"), code_challenge_method:"S256"});
     return {url:"https://api.whop.com/oauth/authorize?"+query, browser};
   }
