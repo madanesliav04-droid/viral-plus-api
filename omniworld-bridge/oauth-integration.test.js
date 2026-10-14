@@ -1,0 +1,43 @@
+"use strict";
+const {test} = require("node:test");
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+test("setup script, callback cookie and authenticated connect route",async()=>{
+  const routes=[];
+  const app={disable(){},use(handler){routes.push({method:"use",handler});},get(path,handler){routes.push({method:"get",path,handler});},post(path,handler){routes.push({method:"post",path,handler});},listen(){}};
+  const express=()=>app; express.json=express.urlencoded=()=>()=>{};
+  let received;
+  const oauth={status:()=>({connected:false}),start:async()=>({url:"https://api.whop.com/oauth/authorize",browser:"browser-binding"}),callback:async args=>{received=args;},accessToken:async()=>"test-access"};
+  const context={process:{env:{BRIDGE_ADMIN_PASSWORD:"test-admin-password-over-twenty"}},console:{log(){}},Buffer,URL,AbortSignal,fetch:async()=>{throw Error("Unexpected network");},require:name=>{
+    if(name==="express")return express;
+    if(name==="node:crypto")return crypto;
+    if(name==="./whop-oauth")return {createWhopOAuth:()=>oauth};
+    return {};
+  }};
+  vm.runInNewContext(fs.readFileSync(__dirname+"/index.js","utf8"),context);
+  function response(){return {headers:{},set(k,v){this.headers[k]=v;return this;},type(){return this;},send(body){this.body=body;return this;},json(body){this.body=body;return this;},status(n){this.code=n;return this;},redirect(url){this.redirected=url;return this;},cookie(...args){this.cookieArgs=args;},clearCookie(...args){this.clearArgs=args;}};}
+  const setup=routes.find(r=>r.path==="/setup"),res=response();
+  setup.handler({},res);
+  new vm.Script(res.body.match(/<script>([\s\S]*)<\/script>/)[1]);
+  assert.match(res.body,/Connecter Whop/);
+  const callback=routes.find(r=>r.path==="/oauth/whop/callback");
+  const cbres=response();
+  await callback.handler({headers:{cookie:"other=x; omni_whop_flow=browser-binding"},query:{state:"state",code:"code"}},cbres);
+  assert.equal(received.browser,"browser-binding");
+  assert.equal(cbres.headers["Referrer-Policy"],"no-referrer");
+  const connect=routes.find(r=>r.path==="/api/whop/connect");
+  const authIndex=routes.findIndex(r=>r.method==="use" && r.handler.length===3);
+  assert.ok(routes.indexOf(callback)<authIndex);
+  assert.ok(routes.indexOf(connect)>authIndex);
+  const denied=response();
+  routes[authIndex].handler({method:"POST",headers:{}},denied,()=>assert.fail("Unauthenticated connect must not run"));
+  assert.equal(denied.code,403);
+  const connected=response();
+  await connect.handler({},connected);
+  assert.equal(connected.cookieArgs[2].sameSite,"lax");
+  assert.equal(connected.cookieArgs[2].httpOnly,true);
+  assert.equal(connected.cookieArgs[2].secure,true);
+  assert.equal(connected.body.browser,undefined);
+});
