@@ -34,19 +34,33 @@ function canAdmin(req) {
 function tgSource(id) {
   return "https://t.me/c/" + TG_CHAT.replace(/^-100/,"") + "/" + id;
 }
-async function whopRequest(path, method, payload) {
+async function whopRequest(path, method, payload, credential = WHOP_KEY) {
   const r = await fetch("https://api.whop.com/api/v1/" + path, {
-    method, headers: {"Authorization":"Bearer " + WHOP_KEY,"Content-Type":"application/json"},
+    method, headers: {"Authorization":"Bearer " + credential,"Content-Type":"application/json"},
     body:payload ? JSON.stringify(payload) : undefined, signal:AbortSignal.timeout(15000)
   });
   if (!r.ok) throw new Error("API Whop [" + method + " " + path.split("?")[0] + "] " + r.status + " : " + (await r.text()).slice(0,150));
   return r.json();
 }
+// Confirmed publishing account: urfavceo75. This identifier is not a secret.
+const WHOP_PUBLISHER_USER_ID = ENV.WHOP_PUBLISHER_USER_ID || "user_Lcgrt81hIa1TM";
 async function postToWhop(text,title) {
+  // Keep the short-lived credential only in memory; never log or persist it.
+  const access = await whopRequest("access_tokens","POST",{
+    account_id:WHOP_ACCOUNT,
+    user_id:WHOP_PUBLISHER_USER_ID,
+    scoped_actions:["forum:read","forum:post:create"],
+    expires_at:new Date(Date.now()+60*60*1000).toISOString()
+  });
+  if(typeof access.token!=="string" || !access.token ||
+     !Number.isFinite(Date.parse(access.expires_at)) ||
+     Date.parse(access.expires_at)<=Date.now()){
+    throw new Error("Whop : jeton utilisateur absent ou expiré.");
+  }
   return whopRequest("forum_posts","POST",{
     experience_id:WHOP_FORUM, content:text,
     title:title.slice(0,100)
-  });
+  },access.token);
 }
 async function whopLastId() {
   const r=await whopRequest("forum_posts?experience_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
