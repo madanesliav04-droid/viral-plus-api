@@ -39,7 +39,7 @@ async function whopRequest(path, method, payload) {
     method, headers: {"Authorization":"Bearer " + WHOP_KEY,"Content-Type":"application/json"},
     body:payload ? JSON.stringify(payload) : undefined, signal:AbortSignal.timeout(15000)
   });
-  if (!r.ok) throw new Error("API Whop " + r.status + " : " + (await r.text()).slice(0,150));
+  if (!r.ok) throw new Error("API Whop [" + method + " " + path.split("?")[0] + "] " + r.status + " : " + (await r.text()).slice(0,150));
   return r.json();
 }
 async function postToWhop(text,title) {
