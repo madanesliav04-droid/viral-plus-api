@@ -44,8 +44,8 @@ async function whopRequest(path, method, payload) {
 }
 async function postToWhop(text,title) {
   return whopRequest("forum_posts","POST",{
-    experience_id:WHOP_FORUM, account_id:WHOP_ACCOUNT, content:text,
-    title:title.slice(0,100), pinned:false, is_mention:false
+    experience_id:WHOP_FORUM, content:text,
+    title:title.slice(0,100)
   });
 }
 async function whopLastId() {
