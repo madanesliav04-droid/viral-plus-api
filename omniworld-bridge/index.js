@@ -184,11 +184,12 @@ app.use((req,res,next)=>{
 const html=[
 "<!doctype html><html lang='fr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>",
 "<title>OMNIWORLD Sync</title><style>body{max-width:560px;margin:30px auto;padding:16px;font:16px system-ui;background:#101720;color:white}button{padding:12px;background:#e0ecff;border:0;border-radius:8px;cursor:pointer}textarea{width:100%;height:90px}img{display:block;max-width:100%;margin:15px auto}section{padding:20px;border:1px solid #526070;border-radius:15px}</style></head>",
-"<body><section><h2>OMNIWORLD — Telegram vers Whop</h2><p>Ton frère doit autoriser l'accès sur son téléphone : <strong>Telegram → Paramètres → Appareils → Connecter un appareil</strong>.</p>",
+"<body><section><h2>OMNIWORLD — Telegram vers Whop</h2><p>Le titulaire du compte doit autoriser l'accès sur son téléphone : <strong>Telegram → Paramètres → Appareils → Connecter un appareil</strong>.</p>",
 "<button id='start'>Afficher le QR Telegram</button><p id='state'>État…</p><div id='qr'></div>",
 "<div id='two' style='display:none'><p>Mot de passe Telegram en deux étapes :</p><input type='password' id='pwd'><button id='submit'>Valider</button></div>",
 "<div id='saved' style='display:none'><p><strong>Session autorisée.</strong> Copie cette valeur dans Railway, variable <code>TELEGRAM_SESSION</code>. Ne la partage jamais en message.</p><textarea id='session' readonly></textarea><button id='copy'>Copier la session</button></div>",
 "<p>Le QR peut mettre 10 à 30 secondes à apparaître. Si une erreur apparaît, envoie seulement son texte.</p><p>Après enregistrement dans Railway, je pourrai tester la synchronisation. Aucune publication automatique avant activation.</p></section>",
+"<section><h3>Test Whop</h3><p>Ce bouton publie un message technique dans le forum OMNIWORLD, puis vérifie sa lecture. Il ne lance pas la synchronisation Telegram.</p><button id='testWhop'>Tester Whop</button><p id='testResult' role='status'></p></section>",
 "<script>const el=id=>document.getElementById(id);",
 "async function refresh(){try{const d=await(await fetch('/api/status',{cache:'no-store'})).json();",
 "el('state').textContent=d.status+(d.error?' — '+d.error:'')+(d.enabled?' — Synchronisation active':' — Synchronisation en attente');",
@@ -199,6 +200,7 @@ const html=[
 "el('start').onclick=async()=>{const r=await fetch('/api/login',{method:'POST'});if(!r.ok)alert((await r.json()).error);refresh();};",
 "el('submit').onclick=async()=>{const v=el('pwd').value;el('pwd').value='';await fetch('/api/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:v})});refresh();};",
 "el('copy').onclick=()=>{navigator.clipboard.writeText(el('session').value);el('copy').textContent='Copié';};",
+"el('testWhop').onclick=async()=>{el('testWhop').disabled=true;el('testResult').textContent='Test en cours…';try{const r=await fetch('/api/test',{method:'POST'});const d=await r.json();el('testResult').textContent=r.ok?'Test réussi : publication retrouvée dans Whop.':d.error||'Test échoué';}catch(e){el('testResult').textContent='Connexion interrompue. Vérifie le forum avant de réessayer.';}finally{el('testWhop').disabled=false;}};",
 "refresh();setInterval(refresh,3000);</script></body></html>"
 ].join("");
 app.get("/",(_,res)=>res.redirect("/setup"));
@@ -209,9 +211,27 @@ app.post("/api/password",(req,res)=>{
   if(!twoFactorResolve || typeof req.body.password!=="string")return res.status(400).json({error:"Aucun mot de passe demandé."});
   const resolve=twoFactorResolve;twoFactorResolve=null;resolve(req.body.password);res.json({ok:true});
 });
+let whopTestBusy=false;
 app.post("/api/test",async(_,res)=>{
-  try{await postToWhop("Test technique — accès à OMNIWORLD confirmé.","OMNIWORLD — Test API");res.json({ok:true});}
-  catch(e){res.status(500).json({error:briefError(e)});}
+  if(whopTestBusy)return res.status(409).json({error:"Un test est déjà en cours."});
+  whopTestBusy=true;
+  const title="OMNIWORLD — Test API";
+  const content="Test technique OMNIWORLD : texte, accents et lien https://telegram.org\nRéférence : omniworld-bridge-test-v1";
+  try{
+    const existing=await whopRequest("forum_posts?experience_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
+    if(!Array.isArray(existing.data))throw new Error("Réponse Whop inattendue : liste absente.");
+    let post=existing.data.find(p=>p.title===title && p.content===content);
+    if(!post)post=await postToWhop(content,title);
+    if(!post.id)throw new Error("Whop n’a pas renvoyé un identifiant de publication.");
+    const verified=await whopRequest("forum_posts/"+encodeURIComponent(post.id),"GET");
+    if(verified.content!==content)throw new Error("Publication créée, mais contenu non confirmé. Vérifier le forum avant de réessayer.");
+    console.info("[whop-test] verified",post.id,"forum",WHOP_FORUM);
+    res.json({ok:true,postId:post.id});
+  }catch(e){
+    const message=briefError(e);
+    console.error("[whop-test] failed",message);
+    res.status(500).json({error:message});
+  }finally{whopTestBusy=false;}
 });
 app.listen(Number(ENV.PORT||3000),"0.0.0.0",()=>console.log("OMNIWORLD bridge listening; sync enabled:",ENABLED));
 restore();
