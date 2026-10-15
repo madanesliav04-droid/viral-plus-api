@@ -96,3 +96,11 @@ test("no credentials or unavailable durable storage cannot start",async t=>{
   await fs.rm(f.directory,{recursive:true});
   await assert.rejects(f.oauth.start(),/indisponible/);
 });
+test("token errors expose known codes but never provider secrets",async t=>{
+  const f=await fixture(t);
+  const oauth=createWhopOAuth({...f.config,request:async()=>({ok:false,status:401,json:async()=>({error:"invalid_client",error_description:"Invalid client_secret SENSITIVE-secret-value"})})});
+  await assert.rejects(authorize(oauth),e=>e.message.includes("invalid_client") && e.message.includes("secret client") && !e.message.includes("SENSITIVE"));
+  assert.equal(JSON.stringify(oauth.status()).includes("SENSITIVE"),false);
+  const unknown=createWhopOAuth({...f.config,request:async()=>({ok:false,status:401,json:async()=>({error:"SENSITIVE-secret-value",error_description:"SENSITIVE-secret-value"})})});
+  await assert.rejects(authorize(unknown),e=>e.message.includes("unspecified_error") && !e.message.includes("SENSITIVE"));
+});
