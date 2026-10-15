@@ -49,46 +49,45 @@ async function postToWhop(text,title) {
     experience_id:WHOP_FORUM, content:text, title:title.slice(0,100)
   });
 }
-async function whopLastId() {
-  const r=await whopRequest("forum_posts?experience_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
-  const list = Array.isArray(r.data) ? r.data : [];
-  let latest=INITIAL_ID;
-  for(const item of list){
-    const s=String(item.content||"");
-    const matches=[...s.matchAll(/https:\/\/t\.me\/c\/\d+\/(\d+)/g)];
-    for (const match of matches) latest=Math.max(latest,Number(match[1]));
-  }
-  return latest;
-}
-async function publish(m){
-  const id=Number(m && m.id || 0);
-  if(!ENABLED || !id || id<=lastPosted) return;
-  let text=String(m.message||m.text||"").trim();
-  if(!text) text=m.media?"[Média publié sur Telegram — voir le message original]":"[Publication Telegram]";
-  const title="OMNI WORLD — "+text.replace(/\s+/g," ").slice(0,82);
-  await postToWhop(text.slice(0,12000)+"\n\n---\nSource Telegram : "+tgSource(id),title);
-  lastPosted=id;
-  processed++;
-}
-function enqueue(m){
-  queue=queue.catch(()=>{}).then(()=>publish(m)).catch(e=>{error=briefError(e);console.error("Sync error: ",error);});
-}
+let syncEngine=null, mediaClient=null;
 async function attach(c){
-  client=c;
-  status="connected";
-  qrImage="";
-  error="";
+  client=c;status="connected";qrImage="";error="";
   const dialogs=await c.getDialogs({limit:500});
-  const match=dialogs.find(d=>String(d.id)===TG_CHAT || String(d.entity && d.entity.id)===TG_CHAT.replace(/^-100/,""));
+  const match=dialogs.find(d=>String(d.id)===TG_CHAT || String(d.entity?.id)===TG_CHAT.replace(/^-100/,""));
   if(!match){status="group_not_found";error="Le compte connecté ne voit pas le groupe Telegram cible.";return;}
   group=match.entity;
-  if(ENABLED){
-    lastPosted=await whopLastId();
-    const messages=await c.getMessages(group,{limit:100});
-    for(const m of [...messages].sort((a,b)=>Number(a.id)-Number(b.id))) enqueue(m);
-  }
-  c.addEventHandler(e=>{if(String(e.chatId)===TG_CHAT)enqueue(e.message);},new NewMessage({}));
+  mediaClient=require("./whop-media").createMedia({request:whopRequest,client:c});
+  syncEngine=require("./sync-engine").createSync({directory:ENV.WHOP_OAUTH_DATA_DIR,chat:TG_CHAT,forum:WHOP_FORUM,request:whopRequest,client:c,group,upload:mediaClient.upload});
+  await syncEngine.init();
+  const kick=()=>{if(ENABLED)syncEngine.run();};
+  c.addEventHandler(e=>{if(String(e.chatId)===TG_CHAT)kick();},new NewMessage({}));
+  setInterval(kick,10000).unref();
   status="connected_listening";
+  if(ENV.MEDIA_PREFLIGHT==="true"){
+    try{
+      const existing=await whopRequest("forum_posts?experience_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
+      const previous=existing.data?.find(p=>p.content==="Test technique du transfert de médias. Référence : omniworld-media-test-v1" && p.attachments?.length);
+      if(previous){console.info("[media-test] previously verified",previous.id);}else{
+      const fileId=await mediaClient.test();
+      const post=await whopRequest("forum_posts","POST",{experience_id:WHOP_FORUM,title:"OMNIWORLD — Test pièce jointe",content:"Test technique du transfert de médias. Référence : omniworld-media-test-v1",attachments:[{id:fileId}],is_mention:false});
+      const check=await whopRequest("forum_posts/"+encodeURIComponent(post.id),"GET");
+      if(!check.attachments?.some(a=>a.id===fileId))throw Error("Pièce jointe non confirmée dans la publication.");
+      console.info("[media-test] verified",post.id);}
+    }catch(e){console.error("[media-test] failed",briefError(e));}
+  }
+  // Read-only inventory: no message content, names, media URLs or credentials in logs.
+  if(ENV.SYNC_INVENTORY==="true"){
+    try{
+      const types={};let count=0,min=null,max=0,large=0;
+      for await(const m of c.iterMessages(group,{})){
+        if(m.action)continue;count++;min=m.id;max=Math.max(max,m.id);
+        const type=m.media?.className||"text";types[type]=(types[type]||0)+1;
+        if(Number(m.media?.document?.size||0)>100*1024*1024)large++;
+      }
+      console.info("[sync-inventory]",JSON.stringify({count,min,max,types,filesOver100MB:large}));
+    }catch(e){console.error("[sync-inventory] failed",briefError(e));}
+  }
+  kick();
 }
 async function restore(){
   if(!configured || !ENV.TELEGRAM_SESSION)return;
@@ -211,7 +210,7 @@ const html=[
 "<script>const el=id=>document.getElementById(id);",
 "async function refresh(){try{const d=await(await fetch('/api/status',{cache:'no-store'})).json();",
 "el('whopState').textContent=d.whop.error||(d.whop.connected?'Compte Whop connecté':d.whop.configured?'Connexion Whop requise':'Configuration OAuth en attente');",
-"el('state').textContent=d.status+(d.error?' — '+d.error:'')+(d.enabled?' — Synchronisation active':' — Synchronisation en attente');",
+"el('state').textContent=(d.sync?.error||d.status)+(d.error?' — '+d.error:'')+(d.enabled?' — Synchronisation active':' — Synchronisation en attente');",
 "el('qr').innerHTML=d.qr?'<img alt=\"QR Telegram\" src=\"'+d.qr+'\">':'';",
 "el('two').style.display=d.twoFactor?'block':'none';",
 "el('saved').style.display=d.session?'block':'none';el('session').value=d.session||'';",
@@ -225,7 +224,7 @@ const html=[
 ].join("");
 app.get("/",(_,res)=>res.redirect("/setup"));
 app.get("/setup",(_,res)=>res.type("html").send(html));
-app.get("/api/status",(_,res)=>res.json({status,error,qr:qrImage,twoFactor:Boolean(twoFactorResolve),session:sessionValue,enabled:ENABLED,groupFound:Boolean(group),processed,whop:whopOAuth.status()}));
+app.get("/api/status",(_,res)=>res.json({status,error,qr:qrImage,twoFactor:Boolean(twoFactorResolve),session:sessionValue,enabled:ENABLED,groupFound:Boolean(group),processed,sync:syncEngine?.status(),whop:whopOAuth.status()}));
 app.post("/api/whop/connect",async(_,res)=>{
   try{
     const flow=await whopOAuth.start();
