@@ -83,6 +83,40 @@ async function attach(c){
       console.info("[media-test] verified",post.id);}
     }catch(e){console.error("[media-test] failed",briefError(e));}
   }
+  if(ENV.SINGLE_POST_TEST==="4371" && !ENABLED){
+    try{
+      await verifyChat();
+      const fs=require("node:fs/promises");
+      const marker=require("node:path").join(ENV.WHOP_OAUTH_DATA_DIR,"chat-test-4371-v1.json");
+      let exists=false;try{await fs.access(marker);exists=true;}catch(e){if(e.code!=="ENOENT")throw e;}
+      if(exists){console.info("[single-test] already attempted; no duplicate");}
+      else{
+        const selected=(await c.getMessages(group,{ids:[4371]}))[0];
+        if(!selected || selected.id!==4371)throw Error("Post Telegram 4371 introuvable.");
+        let album=[selected];
+        if(selected.groupedId){
+          const nearby=await c.getMessages(group,{ids:Array.from({length:41},(_,i)=>4351+i)});
+          album=nearby.filter(m=>m && m.groupedId && String(m.groupedId)===String(selected.groupedId)).sort((a,b)=>a.id-b.id);
+        }
+        if(!album.length || album.length>10)throw Error("Album Telegram inattendu.");
+        const attachments=[];
+        for(const m of album){
+          if(m.media && ["MessageMediaPhoto","MessageMediaDocument"].includes(m.media.className))attachments.push({id:await mediaClient.upload(m)});
+          else if(m.media && m.media.className!=="MessageMediaWebPage")throw Error("Type de média non pris en charge.");
+        }
+        const content=album.map(m=>String(m.message||"")).filter(Boolean).join("\n\n");
+        if(!content && !attachments.length)throw Error("Post vide.");
+        const lock=await fs.open(marker,"wx",0o600);
+        try{await lock.writeFile(JSON.stringify({status:"pending",sourceIds:album.map(m=>m.id)}));await lock.sync();}finally{await lock.close();}
+        const post=await whopRequest("messages","POST",{channel_id:WHOP_FORUM,content,attachments,auto_detect_links:false});
+        if(!post.id)throw Error("Réponse sans identifiant.");
+        await fs.writeFile(marker,JSON.stringify({status:"posted",postId:post.id,sourceIds:album.map(m=>m.id)}),{mode:0o600});
+        const check=await whopRequest("messages/"+encodeURIComponent(post.id),"GET");
+        if(check.content!==content)throw Error("Texte publié non confirmé.");
+        console.info("[single-test] verified",JSON.stringify({postId:post.id,sourceIds:album.map(m=>m.id),attachmentCount:attachments.length,textLength:content.length,previews:false}));
+      }
+    }catch(e){console.error("[single-test] failed",briefError(e));}
+  }
   // Read-only inventory: no message content, names, media URLs or credentials in logs.
   if(ENV.SYNC_INVENTORY==="true"){
     try{
