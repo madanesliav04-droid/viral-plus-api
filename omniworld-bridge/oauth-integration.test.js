@@ -13,6 +13,7 @@ test("setup script, callback cookie and authenticated connect route",async()=>{
   const context={process:{env:{BRIDGE_ADMIN_PASSWORD:"test-admin-password-over-twenty"}},console:{log(){}},Buffer,URL,AbortSignal,fetch:async()=>{throw Error("Unexpected network");},require:name=>{
     if(name==="express")return express;
     if(name==="node:crypto")return crypto;
+    if(name==="./channel")return {mountChannel:()=>({warm:async()=>{}})};
     if(name==="./whop-oauth")return {createWhopOAuth:()=>oauth};
     return {};
   }};
