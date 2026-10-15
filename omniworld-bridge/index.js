@@ -11,7 +11,7 @@ const API_ID = Number(ENV.TELEGRAM_API_ID || 0);
 const API_HASH = ENV.TELEGRAM_API_HASH || "";
 const TG_CHAT = ENV.TELEGRAM_CHAT_ID || "";
 const WHOP_KEY = ENV.WHOP_API_KEY || "";
-const WHOP_FORUM = ENV.WHOP_FORUM_ID || "";
+const WHOP_FORUM = ENV.WHOP_CHAT_ID || "";
 const WHOP_ACCOUNT = ENV.WHOP_COMPANY_ID || "";
 const ADMIN_PASSWORD = ENV.BRIDGE_ADMIN_PASSWORD || "";
 const INITIAL_ID = Number(ENV.TELEGRAM_START_ID || 4386);
@@ -45,9 +45,15 @@ async function whopRequest(path, method, payload, credential) {
   return r.json();
 }
 async function postToWhop(text,title) {
-  return whopRequest("forum_posts","POST",{
-    experience_id:WHOP_FORUM, content:text, title:title.slice(0,100)
+  return whopRequest("messages","POST",{
+    channel_id:WHOP_FORUM, content:text, auto_detect_links:true
   });
+}
+async function verifyChat(){
+  const f=await whopRequest("chat_channels/"+encodeURIComponent(WHOP_FORUM),"GET");
+  if(f.experience?.id!==WHOP_FORUM || f.who_can_post!=="admins" || f.ban_media || f.ban_urls)
+    throw Error("Le Chat doit réserver les messages aux admins et autoriser médias et liens.");
+  console.info("[chat-access]",JSON.stringify({id:f.id,experience:f.experience.id,who_can_post:f.who_can_post,ban_media:f.ban_media,ban_urls:f.ban_urls}));
 }
 let syncEngine=null, mediaClient=null;
 async function attach(c){
@@ -57,7 +63,7 @@ async function attach(c){
   if(!match){status="group_not_found";error="Le compte connecté ne voit pas le groupe Telegram cible.";return;}
   group=match.entity;
   mediaClient=require("./whop-media").createMedia({request:whopRequest,client:c});
-  syncEngine=require("./sync-engine").createSync({directory:ENV.WHOP_OAUTH_DATA_DIR,chat:TG_CHAT,forum:WHOP_FORUM,request:whopRequest,client:c,group,upload:mediaClient.upload});
+  syncEngine=require("./sync-engine").createSync({directory:ENV.WHOP_OAUTH_DATA_DIR,chat:TG_CHAT,forum:WHOP_FORUM,request:whopRequest,client:c,group,upload:mediaClient.upload,verify:verifyChat});
   await syncEngine.init();
   const kick=()=>{if(ENABLED)syncEngine.run();};
   c.addEventHandler(e=>{if(String(e.chatId)===TG_CHAT)kick();},new NewMessage({}));
@@ -66,12 +72,13 @@ async function attach(c){
   status="connected_listening";
   if(ENV.MEDIA_PREFLIGHT==="true"){
     try{
-      const existing=await whopRequest("forum_posts?experience_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
+      await verifyChat();
+      const existing=await whopRequest("messages?channel_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
       const previous=existing.data?.find(p=>p.content==="Test technique du transfert de médias. Référence : omniworld-media-test-v1" && p.attachments?.length);
       if(previous){console.info("[media-test] previously verified",previous.id);}else{
       const fileId=await mediaClient.test();
-      const post=await whopRequest("forum_posts","POST",{experience_id:WHOP_FORUM,title:"OMNIWORLD — Test pièce jointe",content:"Test technique du transfert de médias. Référence : omniworld-media-test-v1",attachments:[{id:fileId}],is_mention:false});
-      const check=await whopRequest("forum_posts/"+encodeURIComponent(post.id),"GET");
+      const post=await whopRequest("messages","POST",{channel_id:WHOP_FORUM,content:"Test technique du transfert de médias. Référence : omniworld-media-test-v1",attachments:[{id:fileId}],auto_detect_links:true});
+      const check=await whopRequest("messages/"+encodeURIComponent(post.id),"GET");
       if(!check.attachments?.some(a=>a.id===fileId))throw Error("Pièce jointe non confirmée dans la publication.");
       console.info("[media-test] verified",post.id);}
     }catch(e){console.error("[media-test] failed",briefError(e));}
@@ -88,15 +95,7 @@ async function attach(c){
       console.info("[sync-inventory]",JSON.stringify({count,min,max,types,filesOver100MB:large}));
     }catch(e){console.error("[sync-inventory] failed",briefError(e));}
   }
-  try{
-    const forumPath="forums/"+encodeURIComponent(WHOP_FORUM);
-    let f=await whopRequest(forumPath,"GET");
-    if(ENV.FORUM_ANNOUNCEMENTS_ONLY==="true" && (f.who_can_post!=="admins" || f.who_can_comment!=="admins")){
-      await whopRequest(forumPath,"PATCH",{who_can_post:"admins",who_can_comment:"admins"},WHOP_KEY);
-      f=await whopRequest(forumPath,"GET");
-    }
-    console.info("[forum-access]",JSON.stringify({id:f.id,who_can_post:f.who_can_post,who_can_comment:f.who_can_comment,is_public:f.experience?.is_public,email_notification_preference:f.email_notification_preference}));
-  }catch(e){console.error("[forum-access] failed",briefError(e));}
+  try{await verifyChat();}catch(e){console.error("[chat-access] failed",briefError(e));}
   kick();
 }
 async function restore(){
@@ -216,7 +215,7 @@ const html=[
 "<div id='saved' style='display:none'><p><strong>Session autorisée.</strong> Copie cette valeur dans Railway, variable <code>TELEGRAM_SESSION</code>. Ne la partage jamais en message.</p><textarea id='session' readonly></textarea><button id='copy'>Copier la session</button></div>",
 "<p>Le QR peut mettre 10 à 30 secondes à apparaître. Si une erreur apparaît, envoie seulement son texte.</p><p>Après enregistrement dans Railway, je pourrai tester la synchronisation. Aucune publication automatique avant activation.</p></section>",
 "<section><h3>Connexion Whop</h3><p>Autorise le compte propriétaire urfavceo75 pour publier dans OMNIWORLD.</p><button id='connectWhop'>Connecter Whop</button><p id='whopState' role='status'></p></section>",
-"<section><h3>Test Whop</h3><p>Ce bouton publie un message technique dans le forum OMNIWORLD, puis vérifie sa lecture. Il ne lance pas la synchronisation Telegram.</p><button id='testWhop'>Tester Whop</button><p id='testResult' role='status'></p></section>",
+"<section><h3>Test Whop</h3><p>Ce bouton publie un message technique dans le Chat OMNIWORLD, puis vérifie sa lecture. Il ne lance pas la synchronisation Telegram.</p><button id='testWhop'>Tester Whop</button><p id='testResult' role='status'></p></section>",
 "<script>const el=id=>document.getElementById(id);",
 "async function refresh(){try{const d=await(await fetch('/api/status',{cache:'no-store'})).json();",
 "el('whopState').textContent=d.whop.error||(d.whop.connected?'Compte Whop connecté':d.whop.configured?'Connexion Whop requise':'Configuration OAuth en attente');",
@@ -229,7 +228,7 @@ const html=[
 "el('submit').onclick=async()=>{const v=el('pwd').value;el('pwd').value='';await fetch('/api/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:v})});refresh();};",
 "el('copy').onclick=()=>{navigator.clipboard.writeText(el('session').value);el('copy').textContent='Copié';};",
 "el('connectWhop').onclick=async()=>{el('connectWhop').disabled=true;try{const r=await fetch('/api/whop/connect',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error);location.assign(d.url);}catch(e){el('whopState').textContent=e.message;el('connectWhop').disabled=false;}};",
-"el('testWhop').onclick=async()=>{el('testWhop').disabled=true;el('testResult').textContent='Test en cours…';try{const r=await fetch('/api/test',{method:'POST'});const d=await r.json();el('testResult').textContent=r.ok?'Test réussi : publication retrouvée dans Whop.':d.error||'Test échoué';}catch(e){el('testResult').textContent='Connexion interrompue. Vérifie le forum avant de réessayer.';}finally{el('testWhop').disabled=false;}};",
+"el('testWhop').onclick=async()=>{el('testWhop').disabled=true;el('testResult').textContent='Test en cours…';try{const r=await fetch('/api/test',{method:'POST'});const d=await r.json();el('testResult').textContent=r.ok?'Test réussi : publication retrouvée dans Whop.':d.error||'Test échoué';}catch(e){el('testResult').textContent='Connexion interrompue. Vérifie le Chat avant de réessayer.';}finally{el('testWhop').disabled=false;}};",
 "refresh();setInterval(refresh,3000);</script></body></html>"
 ].join("");
 app.get("/",(_,res)=>res.redirect("/setup"));
@@ -254,14 +253,15 @@ app.post("/api/test",async(_,res)=>{
   const title="OMNIWORLD — Test API";
   const content="Test technique OMNIWORLD : texte, accents et lien https://telegram.org\nRéférence : omniworld-bridge-test-v1";
   try{
-    const existing=await whopRequest("forum_posts?experience_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
+    await verifyChat();
+    const existing=await whopRequest("messages?channel_id="+encodeURIComponent(WHOP_FORUM)+"&first=100","GET");
     if(!Array.isArray(existing.data))throw new Error("Réponse Whop inattendue : liste absente.");
-    let post=existing.data.find(p=>p.title===title && p.content===content);
+    let post=existing.data.find(p=>p.content===content);
     if(!post)post=await postToWhop(content,title);
     if(!post.id)throw new Error("Whop n’a pas renvoyé un identifiant de publication.");
-    const verified=await whopRequest("forum_posts/"+encodeURIComponent(post.id),"GET");
-    if(verified.content!==content)throw new Error("Publication créée, mais contenu non confirmé. Vérifier le forum avant de réessayer.");
-    console.info("[whop-test] verified",post.id,"forum",WHOP_FORUM);
+    const verified=await whopRequest("messages/"+encodeURIComponent(post.id),"GET");
+    if(verified.content!==content)throw new Error("Publication créée, mais contenu non confirmé. Vérifier le Chat avant de réessayer.");
+    console.info("[whop-test] verified",post.id,"chat",WHOP_FORUM);
     res.json({ok:true,postId:post.id});
   }catch(e){
     const message=briefError(e);
