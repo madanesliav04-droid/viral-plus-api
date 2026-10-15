@@ -55,13 +55,19 @@ async function verifyChat(){
     throw Error("Le Chat doit réserver les messages aux admins et autoriser médias et liens.");
   console.info("[chat-access]",JSON.stringify({id:f.id,experience:f.experience.id,who_can_post:f.who_can_post,ban_media:f.ban_media,ban_urls:f.ban_urls}));
 }
-let syncEngine=null, mediaClient=null;
+let syncEngine=null, mediaClient=null, notificationTimer=null;
 async function attach(c){
   client=c;status="connected";qrImage="";error="";
   const dialogs=await c.getDialogs({limit:500});
   const match=dialogs.find(d=>String(d.id)===TG_CHAT || String(d.entity?.id)===TG_CHAT.replace(/^-100/,""));
   if(!match){status="group_not_found";error="Le compte connecté ne voit pas le groupe Telegram cible.";return;}
   group=match.entity;
+  if(notificationTimer)clearInterval(notificationTimer);
+  if(ENV.CHANNEL_NOTIFICATIONS_ENABLED==='true'){
+    const notifier=require('./channel-notifications').createNotifications({env:ENV,client:c,group,request:whopRequest});
+    await notifier.tick();
+    notificationTimer=setInterval(()=>notifier.tick(),10000);notificationTimer.unref();
+  }
   mediaClient=require("./whop-media").createMedia({request:whopRequest,client:c});
   syncEngine=require("./sync-engine").createSync({directory:ENV.WHOP_OAUTH_DATA_DIR,chat:TG_CHAT,forum:WHOP_FORUM,request:whopRequest,client:c,group,upload:mediaClient.upload,verify:verifyChat});
   await syncEngine.init();
