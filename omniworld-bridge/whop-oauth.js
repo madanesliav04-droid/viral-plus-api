@@ -64,7 +64,28 @@ function createWhopOAuth({env = process.env, request = fetch, clock = Date.now})
         signal:AbortSignal.timeout(15000)
       });
     } catch { throw fail("Whop OAuth : connexion interrompue. Reconnecte Whop si nécessaire."); }
-    if (!response.ok) throw fail("Whop OAuth : échange refusé (HTTP " + response.status + "). Reconnecte Whop.");
+    if (!response.ok) {
+      const detail = await response.json().catch(()=>({}));
+      // Only allowlisted codes and locally written hints leave this function.
+      // Provider messages can echo credentials, so never log their raw text.
+      const candidate = typeof detail.error === "string" ? detail.error : detail.error?.type;
+      const allowed = new Set(["invalid_client","invalid_grant","invalid_request","unauthorized_client","access_denied","insufficient_scope","unauthorized","forbidden","bad_request","invalid_api_key"]);
+      const code = allowed.has(candidate) ? candidate : "unspecified_error";
+      const description = String(detail.error_description || detail.error?.message || detail.message || "").toLowerCase();
+      let hint = "Aucun détail reconnu.";
+      if (description.includes("oauth:token_exchange")) hint = "Whop signale la permission oauth:token_exchange.";
+      else if (/client.?secret|client secret/.test(description)) hint = "Whop signale le secret client.";
+      else if (/api.?key|api key/.test(description)) hint = "Whop signale la clé API de l’application.";
+      else if (/client.?id|client id/.test(description)) hint = "Whop signale l’identifiant de l’application.";
+      else if (/code.*expir|expir.*code/.test(description)) hint = "Whop signale un code expiré.";
+      else if (/code.*used|used.*code/.test(description)) hint = "Whop signale un code déjà utilisé.";
+      else if (/redirect/.test(description)) hint = "Whop signale l’adresse de retour.";
+      else if (/pkce|verifier/.test(description)) hint = "Whop signale la vérification PKCE.";
+      else if (/permission|scope/.test(description)) hint = "Whop signale une permission manquante.";
+      lastError = "Whop OAuth : HTTP " + response.status + " — " + code + ". " + hint;
+      console.warn("[whop-oauth]", lastError);
+      throw fail(lastError);
+    }
     let result;
     try { result = await response.json(); } catch { throw fail("Whop OAuth : réponse invalide."); }
     if (!result.access_token || !result.refresh_token || !Number.isFinite(result.expires_in) || result.expires_in <= 60 ||
