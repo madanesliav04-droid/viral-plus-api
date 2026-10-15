@@ -55,7 +55,7 @@ function mountChannel(app,{env,sessionValid,telegram,request}){
   let cache=null,busy=null,downloadTail=Promise.resolve(),downloadCount=0;
   const previewIds=[4371,4372];
   const enabled=env.CHANNEL_SYNC_ENABLED==='true';
-  const allowedExperience=env.WHOP_CHAT_ID;
+  const allowedExperience=env.WHOP_CHANNEL_EXPERIENCE_ID || env.WHOP_CHAT_ID;
   const appId=env.WHOP_CLIENT_ID;
   const guard=async(req,res,next)=>{
     res.set('Cache-Control','private, no-store');
