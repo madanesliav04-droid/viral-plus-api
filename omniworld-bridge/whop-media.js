@@ -25,18 +25,20 @@ function createMedia({request,client,fetcher=fetch}){
   const doc=m.media?.document;
   const size=Number(doc?.size||0);
   // Bound ephemeral disk usage; unsupported sizes stop the import visibly.
-  if(size>100*1024*1024)throw Error('Fichier supérieur à 100 Mo : message '+m.id+'. Import en pause.');
+  if(size>4*1024*1024*1024)throw Error('Fichier supérieur à 4 Go : message '+m.id+'. Import en pause.');
   const original=doc?.attributes?.find(a=>a.fileName)?.fileName;
   const type=doc?.mimeType||(m.media?.photo?'image/jpeg':'application/octet-stream');
   const extension={'video/mp4':'.mp4','audio/ogg':'.ogg','audio/mpeg':'.mp3','image/jpeg':'.jpg','image/png':'.png','application/pdf':'.pdf'}[type]||'.bin';
   const filename=path.basename(original||('telegram-'+m.id+extension));
   const dir=await fsp.mkdtemp(path.join(os.tmpdir(),'omni-media-'));
   const target=path.join(dir,'download');
+  const disk=await fsp.statfs(dir);
+  if(size && Number(disk.bavail)*Number(disk.bsize)<size+128*1024*1024){await fsp.rm(dir,{recursive:true,force:true});throw Error('Espace temporaire insuffisant pour le média '+m.id);}
   try{
    await client.downloadMedia(m,{outputFile:target});
    const stat=await fsp.stat(target);
    if(!stat.size)throw Error('Média Telegram vide.');
-   if(stat.size>100*1024*1024)throw Error('Média supérieur à 100 Mo.');
+   if(stat.size>4*1024*1024*1024)throw Error('Média supérieur à 4 Go.');
    const stream=fs.createReadStream(target);
    try{return await send(filename,stream,stat.size,type);}finally{stream.destroy();}
   }finally{await fsp.rm(dir,{recursive:true,force:true});}
