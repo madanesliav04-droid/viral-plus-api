@@ -41,7 +41,7 @@ async function whopRequest(path, method, payload, credential) {
     method, headers: {"Authorization":"Bearer " + credential,"Content-Type":"application/json"},
     body:payload ? JSON.stringify(payload) : undefined, signal:AbortSignal.timeout(15000)
   });
-  if (!r.ok) throw new Error("API Whop [" + method + " " + path.split("?")[0] + "] " + r.status + " : " + (await r.text()).slice(0,150));
+  if (!r.ok) {const e=new Error("API Whop [" + method + " " + path.split("?")[0] + "] " + r.status + " : " + (await r.text()).slice(0,150));e.status=r.status;throw e;}
   return r.json();
 }
 async function postToWhop(text,title) {
@@ -62,6 +62,7 @@ async function attach(c){
   const kick=()=>{if(ENABLED)syncEngine.run();};
   c.addEventHandler(e=>{if(String(e.chatId)===TG_CHAT)kick();},new NewMessage({}));
   setInterval(kick,10000).unref();
+  setInterval(()=>{if(ENABLED)console.info("[sync-progress]",JSON.stringify(syncEngine.status()));},30000).unref();
   status="connected_listening";
   if(ENV.MEDIA_PREFLIGHT==="true"){
     try{
