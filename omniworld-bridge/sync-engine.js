@@ -4,8 +4,8 @@ const path=require('node:path');
 const crypto=require('node:crypto');
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 // Durable cursor and intent: an ambiguous POST is reconciled, never blindly repeated.
-function createSync({directory,chat,forum,request,client,group,upload,clock=Date.now}){
- const file=path.join(directory,'telegram-sync.json');
+function createSync({directory,chat,forum,request,client,group,upload,verify=async()=>{},clock=Date.now}){
+ const file=path.join(directory,'telegram-chat-sync.json');
  let state={v:1,chat,forum,cursor:0,posts:{},pending:null},running=false,ready=false;
  let retryAfter=0;
  let info={phase:'paused',cursor:0,count:0,error:''};
@@ -27,7 +27,7 @@ function createSync({directory,chat,forum,request,client,group,upload,clock=Date
   if(!state.pending)return;
   let after='';const seen=new Set();
   do{
-   const r=await request('forum_posts?experience_id='+encodeURIComponent(forum)+'&first=100'+(state.pending.parent?'&parent_id='+encodeURIComponent(state.pending.parent):'')+(after?'&after='+encodeURIComponent(after):''),'GET');
+   const r=await request('messages?channel_id='+encodeURIComponent(forum)+'&first=100'+(after?'&after='+encodeURIComponent(after):''),'GET');
    if(!Array.isArray(r.data))throw Error('Liste Whop invalide.');
    const hit=r.data.find(p=>hash(String(p.content||''))===state.pending.contentHash);
    if(hit){await commit(state.pending.id,hit.id);return;}
@@ -51,11 +51,11 @@ function createSync({directory,chat,forum,request,client,group,upload,clock=Date
   if(!text&&!attachments.length){if(mode==='live')state.liveCursor=id;else state.cursor=id;await save();return;}
   const date=new Date(Number(m.date)*1000).toISOString();
   const content=text+'\n\n---\nTelegram · '+date+'\nSource Telegram : '+messages.map(x=>source(x.id)).join('\n');
-  const payload={experience_id:forum,title:('OMNIWORLD — '+(text||'Pièce jointe').replace(/\s+/g,' ')).slice(0,100),content,attachments,is_mention:false};
+  const payload={channel_id:forum,content,attachments,auto_detect_links:true};
   const parent=m.replyTo?.replyToMsgId;
-  if(parent&&state.posts[parent])payload.parent_id=state.posts[parent];
-  state.pending={id,ids:messages.map(x=>Number(x.id)),mode,contentHash:hash(content),parent:payload.parent_id||null,started:clock()};await save();
-  let p;try{p=await request('forum_posts','POST',payload);}catch(e){if(e.status>=400&&e.status<500){state.pending=null;await save();}throw e;}
+  if(parent&&state.posts[parent])payload.replying_to_message_id=state.posts[parent];
+  state.pending={id,ids:messages.map(x=>Number(x.id)),mode,contentHash:hash(content),parent:payload.replying_to_message_id||null,started:clock()};await save();
+  let p;try{p=await request('messages','POST',payload);}catch(e){if(e.status>=400&&e.status<500){state.pending=null;await save();}throw e;}
   if(!p.id)throw Error('Publication sans identifiant.');
   await commit(id,p.id);
  }
@@ -73,7 +73,7 @@ function createSync({directory,chat,forum,request,client,group,upload,clock=Date
  async function run(){
   if(running||clock()<retryAfter)return;running=true;
   try{
-   await init();await reconcile();info.phase='importing';info.error='';
+   await verify();await init();await reconcile();info.phase='importing';info.error='';
    if(state.boundary===undefined){
     const latest=await client.getMessages(group,{limit:1});
     state.boundary=Number(latest[0]?.id||0);state.liveCursor=state.boundary;await save();
