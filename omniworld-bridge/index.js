@@ -88,6 +88,15 @@ async function attach(c){
       console.info("[sync-inventory]",JSON.stringify({count,min,max,types,filesOver100MB:large}));
     }catch(e){console.error("[sync-inventory] failed",briefError(e));}
   }
+  try{
+    const forumPath="forums/"+encodeURIComponent(WHOP_FORUM);
+    let f=await whopRequest(forumPath,"GET");
+    if(ENV.FORUM_ANNOUNCEMENTS_ONLY==="true" && (f.who_can_post!=="admins" || f.who_can_comment!=="admins")){
+      await whopRequest(forumPath,"PATCH",{who_can_post:"admins",who_can_comment:"admins"},WHOP_KEY);
+      f=await whopRequest(forumPath,"GET");
+    }
+    console.info("[forum-access]",JSON.stringify({id:f.id,who_can_post:f.who_can_post,who_can_comment:f.who_can_comment,is_public:f.experience?.is_public,email_notification_preference:f.email_notification_preference}));
+  }catch(e){console.error("[forum-access] failed",briefError(e));}
   kick();
 }
 async function restore(){
