@@ -70,6 +70,7 @@ async function attach(c){
   setInterval(kick,10000).unref();
   setInterval(()=>{if(ENABLED)console.info("[sync-progress]",JSON.stringify(syncEngine.status()));},30000).unref();
   status="connected_listening";
+  channel.warm().catch(()=>console.error("[channel-ready] preview unavailable"));
   if(ENV.MEDIA_PREFLIGHT==="true"){
     try{
       await verifyChat();
@@ -195,6 +196,7 @@ function sessionValid(req){
   const expected=Buffer.from(signCookie(ts)),received=Buffer.from(sig);
   return received.length===expected.length && crypto.timingSafeEqual(expected,received);
 }
+const channel=require("./channel").mountChannel(app,{env:ENV,sessionValid,telegram:()=>({client,group}),request:whopRequest});
 const loginPage=errorMessage=>[
 "<!doctype html><html lang='fr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
 "<title>Connexion — OMNIWORLD Sync</title><style>body{font:16px system-ui;background:#111822;color:#fff;max-width:430px;margin:50px auto;padding:20px}main{border:1px solid #405169;padding:24px;border-radius:14px}label{display:block;margin-top:20px}input{box-sizing:border-box;width:100%;padding:12px;font-size:16px;border-radius:8px;border:1px solid #9facbc}button{display:block;margin-top:22px;width:100%;padding:14px;border:0;border-radius:8px;background:#dae9ff;font-weight:700;cursor:pointer}.error{color:#ffb0b0}</style>",
@@ -249,6 +251,7 @@ const html=[
 "<div id='saved' style='display:none'><p><strong>Session autorisée.</strong> Copie cette valeur dans Railway, variable <code>TELEGRAM_SESSION</code>. Ne la partage jamais en message.</p><textarea id='session' readonly></textarea><button id='copy'>Copier la session</button></div>",
 "<p>Le QR peut mettre 10 à 30 secondes à apparaître. Si une erreur apparaît, envoie seulement son texte.</p><p>Après enregistrement dans Railway, je pourrai tester la synchronisation. Aucune publication automatique avant activation.</p></section>",
 "<section><h3>Connexion Whop</h3><p>Autorise le compte propriétaire urfavceo75 pour publier dans OMNIWORLD.</p><button id='connectWhop'>Connecter Whop</button><p id='whopState' role='status'></p></section>",
+"<section><h3>Nouveau canal OMNIWORLD</h3><p>Photos groupées, légende sous l’album et lecture réservée aux membres.</p><a href='/channel/preview' style='color:#aee9dc'>Ouvrir le nouveau canal</a></section>",
 "<section><h3>Test Whop</h3><p>Ce bouton publie un message technique dans le Chat OMNIWORLD, puis vérifie sa lecture. Il ne lance pas la synchronisation Telegram.</p><button id='testWhop'>Tester Whop</button><p id='testResult' role='status'></p></section>",
 "<script>const el=id=>document.getElementById(id);",
 "async function refresh(){try{const d=await(await fetch('/api/status',{cache:'no-store'})).json();",
