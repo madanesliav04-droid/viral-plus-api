@@ -34,7 +34,7 @@ test("PKCE, owner identity and encrypted restart persistence",async t=>{
   const f=await fixture(t);
   const {flow,params}=await authorize(f.oauth);
   assert.equal(params.has("company_id"),false);
-  assert.equal(params.get("scope"),"openid profile forum:read forum:post:create");
+  assert.equal(params.get("scope"),"openid profile chat:read chat:message:create");
   assert.match(params.get("nonce"),/^[A-Za-z0-9_-]{43}$/);
   assert.notEqual(params.get("nonce"),params.get("state"));
   const body=f.calls[0].body;
