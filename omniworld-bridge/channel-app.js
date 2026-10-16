@@ -1,6 +1,12 @@
 'use strict';
 const feed=document.getElementById('feed'),older=document.getElementById('older'),error=document.getElementById('error'),viewer=document.getElementById('viewer');
-const posts=new Map();let before=null,loading=false;
+const posts=new Map();let before=null,loading=false,initialized=false,followLatest=true;
+const latest=element('button','latest','↓ Dernier message');latest.type='button';latest.hidden=true;document.body.append(latest);
+function atBottom(){return document.documentElement.scrollHeight-window.innerHeight-window.scrollY<140;}
+function goLatest(){followLatest=true;latest.hidden=true;latest.textContent='↓ Dernier message';window.scrollTo(0,document.documentElement.scrollHeight);}
+latest.onclick=goLatest;
+window.addEventListener('scroll',()=>{followLatest=atBottom();latest.hidden=followLatest;},{passive:true});
+new ResizeObserver(()=>{if(initialized&&followLatest)goLatest();}).observe(feed);
 const date=new Intl.DateTimeFormat('fr-FR',{day:'numeric',month:'long',year:'numeric'}),time=new Intl.DateTimeFormat('fr-FR',{hour:'2-digit',minute:'2-digit'});
 function element(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text)e.textContent=text;return e;}
 function mediaURL(id){return '/channel/media/'+encodeURIComponent(id);}
@@ -25,10 +31,20 @@ async function load(previous=false){
   if(loading)return;loading=true;older.disabled=true;
   try{const r=await fetch('/channel/api/feed'+(previous&&before?'?before='+before:''),{cache:'no-store'});if(!r.ok)throw Error(r.status===401||r.status===403?'Ouvre le canal depuis ton espace Whop ou reconnecte-toi.':'Chargement interrompu. Réessaie.');const d=await r.json();
     const changed=d.posts.some(p=>JSON.stringify(posts.get(p.id))!==JSON.stringify(p));const height=document.documentElement.scrollHeight;
+    const oldMax=Math.max(0,...posts.keys()),hasNew=d.posts.some(p=>p.id>oldMax);
+    const stick=!previous&&(!initialized||followLatest);
+    const anchor=[...feed.querySelectorAll('.post')].find(p=>p.getBoundingClientRect().bottom>90);
+    const anchorId=anchor?.id,anchorTop=anchor?.getBoundingClientRect().top;
+    if(previous)followLatest=false;
     d.posts.forEach(p=>posts.set(p.id,p));if(previous||before===null)before=d.before;
     document.getElementById('notice').hidden=!d.preview;older.hidden=!before||before<=1;
-    if(changed||!posts.size)render();if(previous)window.scrollBy(0,document.documentElement.scrollHeight-height);
     error.replaceChildren();
+    if(changed||!posts.size)render();
+    initialized=true;
+    if(stick)goLatest();
+    else if(anchorId&&document.getElementById(anchorId))window.scrollBy(0,document.getElementById(anchorId).getBoundingClientRect().top-anchorTop);
+    else if(previous)window.scrollBy(0,document.documentElement.scrollHeight-height);
+    if(!stick){latest.hidden=false;if(hasNew&&!previous)latest.textContent='↓ Nouveaux messages';}
   }catch(e){error.textContent=e.message;const b=element('button','retry','Réessayer');b.onclick=()=>load(previous);error.append(document.createElement('br'),b);}
   finally{loading=false;older.disabled=false;}
 }
